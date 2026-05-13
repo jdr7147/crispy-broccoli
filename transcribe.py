@@ -147,10 +147,27 @@ def diarize(wav_path: Path, hf_token: str, num_speakers: int | None):
     if num_speakers:
         params["num_speakers"] = num_speakers
     diarization = pipeline(audio_input, **params)
-    return [
-        (turn.start, turn.end, speaker)
-        for turn, _, speaker in diarization.itertracks(yield_label=True)
-    ]
+
+    # Support both old Annotation API and newer DiarizeOutput API
+    if hasattr(diarization, "itertracks"):
+        return [
+            (turn.start, turn.end, speaker)
+            for turn, _, speaker in diarization.itertracks(yield_label=True)
+        ]
+
+    turns = []
+    for item in diarization:
+        if hasattr(item, "segment") and hasattr(item, "label"):
+            turns.append((item.segment.start, item.segment.end, item.label))
+        elif hasattr(item, "segment") and hasattr(item, "speaker"):
+            turns.append((item.segment.start, item.segment.end, item.speaker))
+        elif isinstance(item, tuple) and len(item) == 2:
+            seg, spk = item
+            turns.append((seg.start, seg.end, spk))
+        elif isinstance(item, tuple) and len(item) == 3:
+            seg, _, spk = item
+            turns.append((seg.start, seg.end, spk))
+    return turns
 
 
 def assign_speakers(segments, turns):
