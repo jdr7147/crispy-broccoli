@@ -148,26 +148,26 @@ def diarize(wav_path: Path, hf_token: str, num_speakers: int | None):
         params["num_speakers"] = num_speakers
     diarization = pipeline(audio_input, **params)
 
-    # Support both old Annotation API and newer DiarizeOutput API
-    if hasattr(diarization, "itertracks"):
+    # DiarizeOutput wraps the Annotation — unwrap it if needed
+    annotation = diarization
+    for attr in ("diarization", "annotation", "speaker_diarization"):
+        if hasattr(diarization, attr):
+            candidate = getattr(diarization, attr)
+            if hasattr(candidate, "itertracks"):
+                annotation = candidate
+                break
+
+    if hasattr(annotation, "itertracks"):
         return [
             (turn.start, turn.end, speaker)
-            for turn, _, speaker in diarization.itertracks(yield_label=True)
+            for turn, _, speaker in annotation.itertracks(yield_label=True)
         ]
 
-    turns = []
-    for item in diarization:
-        if hasattr(item, "segment") and hasattr(item, "label"):
-            turns.append((item.segment.start, item.segment.end, item.label))
-        elif hasattr(item, "segment") and hasattr(item, "speaker"):
-            turns.append((item.segment.start, item.segment.end, item.speaker))
-        elif isinstance(item, tuple) and len(item) == 2:
-            seg, spk = item
-            turns.append((seg.start, seg.end, spk))
-        elif isinstance(item, tuple) and len(item) == 3:
-            seg, _, spk = item
-            turns.append((seg.start, seg.end, spk))
-    return turns
+    raise RuntimeError(
+        f"Cannot extract speaker turns from pyannote output (type: {type(diarization)}, "
+        f"attrs: {[a for a in dir(diarization) if not a.startswith('_')]}). "
+        "Please open an issue with this message."
+    )
 
 
 def assign_speakers(segments, turns):
