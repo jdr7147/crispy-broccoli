@@ -123,6 +123,7 @@ def transcribe_segments(wav_path: Path, model_size: str, language: str | None):
 def diarize(wav_path: Path, hf_token: str, num_speakers: int | None):
     """Return list of (start_sec, end_sec, speaker_id) tuples."""
     try:
+        import torch
         from pyannote.audio import Pipeline
     except ImportError:
         sys.exit("pyannote.audio is not installed. Run: pip install pyannote.audio")
@@ -130,13 +131,22 @@ def diarize(wav_path: Path, hf_token: str, num_speakers: int | None):
     print("Loading speaker diarization model …")
     pipeline = Pipeline.from_pretrained(
         "pyannote/speaker-diarization-3.1",
-        use_auth_token=hf_token,
+        token=hf_token,
     )
     print("Running diarization …")
+
+    # Load via scipy to bypass torchcodec/FFmpeg on Windows
+    import scipy.io.wavfile as wavfile
+    sr, data = wavfile.read(str(wav_path))
+    if data.dtype == np.int16:
+        data = data.astype(np.float32) / 32767.0
+    waveform = torch.from_numpy(data).unsqueeze(0)  # (1, samples)
+    audio_input = {"waveform": waveform, "sample_rate": sr}
+
     params = {}
     if num_speakers:
         params["num_speakers"] = num_speakers
-    diarization = pipeline(str(wav_path), **params)
+    diarization = pipeline(audio_input, **params)
     return [
         (turn.start, turn.end, speaker)
         for turn, _, speaker in diarization.itertracks(yield_label=True)
