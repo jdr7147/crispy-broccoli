@@ -1,6 +1,7 @@
 sounddevice>=0.4.6
 numpy>=1.24
 openai-whisper>=20231117
+anthropic>=0.40.0
 
 # Optional — only needed for --diarize
 # pyannote.audio>=3.1

@@ -2,11 +2,14 @@
 """
 Meeting transcription tool.
 Records microphone + system audio, transcribes with local Whisper,
-and optionally separates speakers (Person A, Person B, …) via pyannote.
+optionally separates speakers (Person A, Person B, …) via pyannote,
+and generates a key-notes summary using the Claude API.
 """
 
 import argparse
+import os
 import queue
+import subprocess
 import sys
 import threading
 import wave
@@ -122,9 +125,7 @@ def diarize(wav_path: Path, hf_token: str, num_speakers: int | None):
     try:
         from pyannote.audio import Pipeline
     except ImportError:
-        sys.exit(
-            "pyannote.audio is not installed. Run: pip install pyannote.audio"
-        )
+        sys.exit("pyannote.audio is not installed. Run: pip install pyannote.audio")
 
     print("Loading speaker diarization model …")
     pipeline = Pipeline.from_pretrained(
@@ -143,10 +144,6 @@ def diarize(wav_path: Path, hf_token: str, num_speakers: int | None):
 
 
 def assign_speakers(segments, turns):
-    """
-    Map each Whisper segment to the speaker with the greatest time overlap.
-    Returns list of (label, text) where label is 'Person A', 'Person B', etc.
-    """
     speaker_map: dict[str, str] = {}
     alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
     labeled = []
@@ -170,7 +167,6 @@ def assign_speakers(segments, turns):
 
 
 def format_diarized(labeled: list[tuple[str, str]]) -> str:
-    """Merge consecutive same-speaker segments into one block."""
     lines = []
     current_speaker, current_text = None, []
     for speaker, text in labeled:
@@ -186,12 +182,89 @@ def format_diarized(labeled: list[tuple[str, str]]) -> str:
 
 
 # ---------------------------------------------------------------------------
+# Key notes via Claude API
+# ---------------------------------------------------------------------------
+
+NOTES_SYSTEM_PROMPT = """You are an expert meeting assistant. Your job is to read a meeting transcript and produce a concise, well-structured set of key notes.
+
+Format your response exactly as follows (use these exact headings):
+
+## Summary
+2-3 sentence overview of what the meeting was about.
+
+## Key Decisions
+- Bullet list of decisions that were made (omit if none).
+
+## Action Items
+- Bullet list of tasks assigned or agreed upon, with owner if mentioned (omit if none).
+
+## Important Topics
+- Bullet list of the main subjects discussed.
+
+## Notable Quotes
+- Any particularly important or quotable statements (omit if none).
+
+Keep each section tight and scannable. Do not add extra commentary outside these sections."""
+
+
+def generate_notes(transcript: str, anthropic_key: str) -> str:
+    """Call Claude to produce key notes from the transcript. Returns the notes text."""
+    try:
+        import anthropic
+    except ImportError:
+        sys.exit(
+            "anthropic package is not installed. Run: pip install anthropic\n"
+            "Or skip notes with --no-notes"
+        )
+
+    client = anthropic.Anthropic(api_key=anthropic_key)
+
+    print("Generating key notes with Claude …")
+
+    with client.messages.stream(
+        model="claude-opus-4-7",
+        max_tokens=2048,
+        system=[
+            {
+                "type": "text",
+                "text": NOTES_SYSTEM_PROMPT,
+                "cache_control": {"type": "ephemeral"},
+            }
+        ],
+        messages=[
+            {
+                "role": "user",
+                "content": f"Here is the meeting transcript:\n\n{transcript}",
+            }
+        ],
+    ) as stream:
+        notes = stream.get_final_message()
+
+    return next(
+        (block.text for block in notes.content if block.type == "text"), ""
+    ).strip()
+
+
+def open_file(path: Path):
+    """Open a file with the default OS application."""
+    try:
+        if sys.platform == "win32":
+            os.startfile(str(path))
+        elif sys.platform == "darwin":
+            subprocess.run(["open", str(path)], check=True)
+        else:
+            subprocess.run(["xdg-open", str(path)], check=True)
+    except Exception as e:
+        print(f"  (Could not auto-open file: {e})")
+
+
+# ---------------------------------------------------------------------------
 # CLI
 # ---------------------------------------------------------------------------
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Record a meeting and transcribe it, with optional speaker labels."
+        description="Record a meeting, transcribe it, and generate key notes."
     )
     parser.add_argument(
         "--model",
@@ -225,6 +298,19 @@ def main():
         help="Hint: exact number of speakers, if known.",
     )
 
+    # Key notes
+    parser.add_argument(
+        "--no-notes",
+        action="store_true",
+        help="Skip key-notes generation (no Claude API call).",
+    )
+    parser.add_argument(
+        "--anthropic-key",
+        default=None,
+        help="Anthropic API key for notes generation. "
+             "Falls back to the ANTHROPIC_API_KEY environment variable.",
+    )
+
     args = parser.parse_args()
 
     if args.diarize and not args.hf_token:
@@ -234,6 +320,15 @@ def main():
             "Get one free at: https://huggingface.co/settings/tokens\n"
             "(Also accept the model terms at: "
             "https://huggingface.co/pyannote/speaker-diarization-3.1)"
+        )
+
+    # Resolve Anthropic key
+    anthropic_key = args.anthropic_key or os.environ.get("ANTHROPIC_API_KEY")
+    if not args.no_notes and not anthropic_key:
+        sys.exit(
+            "Key-notes generation requires an Anthropic API key.\n"
+            "Pass it with --anthropic-key YOUR_KEY or set ANTHROPIC_API_KEY.\n"
+            "To skip notes entirely, use --no-notes."
         )
 
     devices = sd.query_devices()
@@ -261,6 +356,7 @@ def main():
         print("  System audio  : not found — recording microphone only")
     print(f"  Whisper model : {args.model}")
     print(f"  Diarization   : {'yes' if args.diarize else 'no'}")
+    print(f"  Key notes     : {'no (--no-notes)' if args.no_notes else 'yes (Claude API)'}")
     print()
     print("Press ENTER to start recording, then press ENTER again to stop.")
     input("  > ready? press ENTER to begin … ")
@@ -310,6 +406,7 @@ def main():
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     wav_path = args.output_dir / f"meeting_{timestamp}.wav"
     transcript_path = args.output_dir / f"meeting_{timestamp}.txt"
+    notes_path = args.output_dir / f"meeting_{timestamp}_notes.txt"
 
     save_wav(wav_path, audio, args.samplerate)
     print(f"Audio saved to {wav_path}")
@@ -325,9 +422,22 @@ def main():
 
     transcript_path.write_text(output_text, encoding="utf-8")
     print(f"Transcript saved to {transcript_path}")
-    print()
-    print("=== TRANSCRIPT ===")
-    print(output_text)
+
+    # Key notes
+    if not args.no_notes:
+        notes_text = generate_notes(output_text, anthropic_key)
+        notes_path.write_text(notes_text, encoding="utf-8")
+        print(f"Key notes saved to {notes_path}")
+        print()
+        print("=== KEY NOTES ===")
+        print(notes_text)
+        print()
+        print("Opening notes file …")
+        open_file(notes_path)
+    else:
+        print()
+        print("=== TRANSCRIPT ===")
+        print(output_text)
 
     if args.no_audio_save:
         wav_path.unlink()
