@@ -79,9 +79,16 @@ def record_stream(device_index, samplerate, channels, out_queue, stop_event):
     )
 
 
+def _normalize(audio: np.ndarray) -> np.ndarray:
+    peak = np.abs(audio).max()
+    return audio / peak if peak > 1e-6 else audio
+
+
 def mix_to_mono(a: np.ndarray, b: np.ndarray) -> np.ndarray:
     a_mono = a.mean(axis=1) if a.ndim > 1 else a.flatten()
     b_mono = b.mean(axis=1) if b.ndim > 1 else b.flatten()
+    a_mono = _normalize(a_mono)
+    b_mono = _normalize(b_mono)
     n = min(len(a_mono), len(b_mono))
     return np.clip((a_mono[:n] + b_mono[:n]) / 2.0, -1.0, 1.0)
 
