@@ -1,9 +1,8 @@
 # Meeting Transcription Tool — Windows Setup Guide
 
 Records your microphone and system audio, transcribes the conversation locally
-using OpenAI Whisper (nothing is sent to the cloud for transcription), optionally
-labels each speaker as **Person A**, **Person B**, etc., and produces a formatted
-set of key notes via the Claude API.
+using OpenAI Whisper (nothing leaves your machine), and optionally labels each
+speaker as **Person A**, **Person B**, etc.
 
 ---
 
@@ -13,9 +12,8 @@ set of key notes via the Claude API.
 |---|---|
 | Windows 10 or 11 | 64-bit |
 | Python 3.10 – 3.12 | 3.13 is **not** recommended (library compatibility) |
-| An Anthropic API key | For key-notes generation. Free to create at console.anthropic.com |
-| A Hugging Face account + token | Only needed if you want speaker labels (Person A, B, …) |
 | ~3 GB free disk space | For Python packages and Whisper models |
+| A Hugging Face account + token | Only needed if you want speaker labels (Person A, B, …) |
 
 ---
 
@@ -64,72 +62,45 @@ Your prompt should now start with `(venv)`. You must activate this environment
 With the environment activated, run:
 
 ```
-pip install sounddevice numpy openai-whisper anthropic
+pip install sounddevice numpy openai-whisper
 ```
 
-This installs the audio capture, transcription, and Claude API libraries.
-It may take a few minutes — Whisper downloads its own dependencies.
+This may take a few minutes — Whisper downloads its own dependencies.
 
 ---
 
-## Step 4 — Get an Anthropic API Key
+## Step 4 — Download the Files
 
-The tool uses the Claude API to generate key notes from your transcript.
+Save both files to the same folder, for example `C:\Users\YourName\Downloads\`:
 
-1. Go to **console.anthropic.com** and sign in (or create a free account).
-2. Click **API Keys** in the left menu.
-3. Click **Create Key**, give it a name (e.g. "transcription tool"), and click Create.
-4. **Copy the key immediately** — it starts with `sk-ant-` and is only shown once.
-5. Keep it somewhere safe (a password manager or a notepad file you store privately).
+- `transcribe.py` — the main tool
+- `transcribe_config.txt` — your personal word hints (names, terms)
 
 ---
 
-## Step 5 — (Optional) Set Up Speaker Labels
+## Step 5 — Add Your Names to the Config File
 
-Skip this section if you do not need to know who said what — the tool works fine
-without it. Come back here if you want **Person A / Person B** labels.
-
-### 5a — Create a Hugging Face account and token
-
-1. Go to **huggingface.co** and create a free account.
-2. Click your profile picture → **Settings** → **Access Tokens**.
-3. Click **New token**, name it anything, set role to **Read**, and create it.
-4. Copy the token (starts with `hf_`).
-
-### 5b — Accept the model license agreements
-
-The speaker-labeling models are gated and require you to accept terms on three
-separate pages. Sign in to Hugging Face, then visit each link below and click
-**"Agree and access repository"**:
-
-- huggingface.co/pyannote/speaker-diarization-3.1
-- huggingface.co/pyannote/segmentation-3.0
-- huggingface.co/pyannote/speaker-diarization-community-1
-
-### 5c — Install the diarization library
+Open `transcribe_config.txt` in Notepad. It looks like this:
 
 ```
-pip install pyannote.audio
+# People
+Jarrett, Ash, Nic
+
+# Add company names, product names, acronyms, or technical terms below:
 ```
 
-> **Note:** This also installs PyTorch (~2 GB). The download may take several minutes.
+Edit the names and add any words that Whisper tends to mishear — company names,
+product names, acronyms, technical terms. Save the file. The tool reads it
+automatically every time it runs, so Whisper will recognise those words correctly.
+
+Lines starting with `#` are comments and are ignored.
 
 ---
 
-## Step 6 — Download the Script
+## Step 6 — Run the Tool
 
-Save `transcribe.py` to a folder you can find easily, for example:
-
-```
-C:\Users\YourName\Downloads\transcribe.py
-```
-
----
-
-## Step 7 — Run the Tool
-
-Open Command Prompt, activate the virtual environment, then navigate to where
-you saved the script:
+Open Command Prompt, activate the virtual environment, then navigate to the
+folder containing the script:
 
 ```
 C:\venv\Scripts\activate
@@ -139,18 +110,48 @@ cd C:\Users\YourName\Downloads
 ### Basic usage (transcript only, no speaker labels)
 
 ```
-python transcribe.py --anthropic-key "sk-ant-YOUR_KEY_HERE"
+python transcribe.py
 ```
 
 ### With speaker labels
 
 ```
-python transcribe.py --anthropic-key "sk-ant-YOUR_KEY_HERE" --diarize --hf-token "hf_YOUR_TOKEN_HERE"
+python transcribe.py --diarize --hf-token "hf_YOUR_TOKEN_HERE"
 ```
 
 Press **Enter** to start recording, speak, then press **Enter** again to stop.
-The tool will transcribe the audio, generate key notes, and open the notes file
-automatically.
+The transcript is saved to a `.txt` file and printed to the screen.
+
+---
+
+## Step 7 — (Optional) Set Up Speaker Labels
+
+Skip this section if you do not need to know who said what.
+
+### 7a — Create a Hugging Face account and token
+
+1. Go to **huggingface.co** and create a free account.
+2. Click your profile picture → **Settings** → **Access Tokens**.
+3. Click **New token**, name it anything, set role to **Read**, and create it.
+4. Copy the token (starts with `hf_`).
+
+### 7b — Accept the model license agreements
+
+The speaker-labeling models are gated and require you to accept terms on three
+separate pages. Sign in to Hugging Face, then visit each link below and click
+**"Agree and access repository"**:
+
+- huggingface.co/pyannote/speaker-diarization-3.1
+- huggingface.co/pyannote/segmentation-3.0
+- huggingface.co/pyannote/speaker-diarization-community-1
+
+### 7c — Install the diarization library
+
+```
+pip install pyannote.audio
+```
+
+> **Note:** This also installs PyTorch (~2 GB). The download may take several minutes.
 
 ---
 
@@ -158,19 +159,18 @@ automatically.
 
 | Argument | Default | Description |
 |---|---|---|
-| `--anthropic-key KEY` | *(required unless `--no-notes`)* | Your Anthropic API key for key-notes generation. Alternatively, set the `ANTHROPIC_API_KEY` environment variable and omit this flag. |
 | `--model SIZE` | `base` | Whisper model size. Larger = more accurate but slower. Choices: `tiny`, `base`, `small`, `medium`, `large`. Start with `base`; upgrade to `small` or `medium` if accuracy is poor. |
 | `--language CODE` | *(auto-detect)* | Force a language, e.g. `--language en`. Speeds up transcription and improves accuracy when you know the language. |
+| `--initial-prompt "WORDS"` | *(from config file)* | Names or terms to hint Whisper toward for this session only. Merged with `transcribe_config.txt` automatically. Example: `--initial-prompt "Salesforce, Q3 roadmap"` |
 | `--samplerate HZ` | `16000` | Audio sample rate in Hz. 16000 is correct for Whisper and rarely needs changing. |
-| `--output-dir PATH` | `.` (current folder) | Folder where transcript and notes files are saved. Created automatically if it does not exist. Example: `--output-dir C:\Meetings` |
+| `--output-dir PATH` | `.` (current folder) | Folder where transcript and audio files are saved. Created automatically if it does not exist. Example: `--output-dir C:\Meetings` |
 | `--list-devices` | — | Print all audio devices and their index numbers, then exit. Use this to find the right `--mic-device` or `--monitor-device` index if the tool picks the wrong device. |
 | `--mic-device INDEX` | *(auto-detect)* | Device index for your microphone. Get the index from `--list-devices`. |
 | `--monitor-device INDEX` | *(auto-detect)* | Device index for system audio (what plays through your speakers). The tool looks for WASAPI loopback / "Stereo Mix" automatically. Use this flag if it picks the wrong one. |
 | `--no-audio-save` | — | Delete the recorded `.wav` file after transcription. By default the audio is kept alongside the transcript. |
-| `--diarize` | — | Enable speaker labeling (Person A, Person B, …). Requires `--hf-token` and the optional pyannote install from Step 5. |
-| `--hf-token TOKEN` | *(required with `--diarize`)* | Your Hugging Face access token. See Step 5. |
+| `--diarize` | — | Enable speaker labeling (Person A, Person B, …). Requires `--hf-token` and the optional pyannote install from Step 7. |
+| `--hf-token TOKEN` | *(required with `--diarize`)* | Your Hugging Face access token. See Step 7. |
 | `--num-speakers N` | *(auto-detect)* | Tell the diarization model exactly how many speakers were in the meeting. Providing this improves accuracy when you know the number. Example: `--num-speakers 3` |
-| `--no-notes` | — | Skip the Claude API call entirely. The transcript is still saved and printed, but no key-notes file is generated. Useful if you do not have an API key or want to save API costs. |
 
 ---
 
@@ -183,30 +183,6 @@ with a timestamp in the name.
 |---|---|
 | `meeting_YYYYMMDD_HHMMSS.wav` | Raw audio recording |
 | `meeting_YYYYMMDD_HHMMSS.txt` | Full transcript (with speaker labels if `--diarize` was used) |
-| `meeting_YYYYMMDD_HHMMSS_notes.txt` | Key notes generated by Claude (omitted with `--no-notes`) |
-
-The notes file opens automatically when transcription is complete.
-
----
-
-## Saving Your API Key Permanently
-
-Instead of typing `--anthropic-key` every time, save the key as a Windows
-environment variable:
-
-1. Press `Win + S`, search for **"Edit the system environment variables"**, and open it.
-2. Click **Environment Variables…**
-3. Under **User variables**, click **New**.
-4. Variable name: `ANTHROPIC_API_KEY`
-5. Variable value: your key (`sk-ant-...`)
-6. Click OK on all windows.
-7. Open a **new** Command Prompt window for the change to take effect.
-
-After this, you can run the tool without `--anthropic-key`:
-
-```
-python transcribe.py
-```
 
 ---
 
@@ -223,17 +199,18 @@ Devices" → enable **Stereo Mix** if it appears. Then re-run the tool.
 
 **Transcription is inaccurate**
 Try a larger Whisper model: `--model small` or `--model medium`. Also try
-setting `--language en` (or your language code) to skip auto-detection.
+setting `--language en` (or your language code) to skip auto-detection. Make
+sure names and terms are listed in `transcribe_config.txt`.
 
 **Speaker labels are all "Person A"**
 Diarization works best with clear audio and at least a few seconds of each
 speaker talking. Try `--num-speakers 2` (or however many speakers there were)
 to give the model a hint.
 
-**"invalid x-api-key" from Anthropic**
-Your API key is wrong or expired. Return to Step 4, create a new key, and copy
-it carefully — no extra spaces or quote characters.
-
 **pip install fails with long path error**
 Make sure you created the virtual environment at `C:\venv` as shown in Step 2,
 not inside a deep user profile folder.
+
+**"No module named 'sounddevice'" or similar**
+The virtual environment is not active. Run `C:\venv\Scripts\activate` first,
+then try again.
