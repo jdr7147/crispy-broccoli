@@ -106,7 +106,20 @@ def save_wav(path: Path, audio: np.ndarray, samplerate: int):
 # Transcription (Whisper)
 # ---------------------------------------------------------------------------
 
-def transcribe_segments(wav_path: Path, model_size: str, language: str | None):
+def load_prompt_config(script_path: Path) -> str:
+    """Load initial prompt words from transcribe_config.txt next to the script."""
+    config_path = script_path.parent / "transcribe_config.txt"
+    if not config_path.exists():
+        return ""
+    words = []
+    for line in config_path.read_text(encoding="utf-8").splitlines():
+        line = line.strip()
+        if line and not line.startswith("#"):
+            words.extend(w.strip() for w in line.split(",") if w.strip())
+    return ", ".join(words)
+
+
+def transcribe_segments(wav_path: Path, model_size: str, language: str | None, initial_prompt: str | None):
     """Return (full_text, segments) where segments have start/end/text keys."""
     try:
         import whisper
@@ -119,6 +132,8 @@ def transcribe_segments(wav_path: Path, model_size: str, language: str | None):
     opts = {"word_timestamps": False}
     if language:
         opts["language"] = language
+    if initial_prompt:
+        opts["initial_prompt"] = initial_prompt
     result = model.transcribe(str(wav_path), **opts)
     return result["text"].strip(), result.get("segments", [])
 
@@ -307,6 +322,12 @@ def main():
         help="Whisper model size (default: base)",
     )
     parser.add_argument("--language", default=None, help="Language code, e.g. 'en'.")
+    parser.add_argument(
+        "--initial-prompt",
+        default=None,
+        help="Words/names to hint Whisper toward (e.g. 'Jarrett, Ash, Nic'). "
+             "Merged with transcribe_config.txt if present.",
+    )
     parser.add_argument("--samplerate", type=int, default=16000)
     parser.add_argument("--output-dir", type=Path, default=Path("."))
     parser.add_argument("--list-devices", action="store_true")
@@ -356,6 +377,13 @@ def main():
             "https://huggingface.co/pyannote/speaker-diarization-3.1)"
         )
 
+    # Resolve initial prompt: config file first, CLI arg overrides/extends
+    config_prompt = load_prompt_config(Path(__file__))
+    if args.initial_prompt and config_prompt:
+        initial_prompt = f"{config_prompt}, {args.initial_prompt}"
+    else:
+        initial_prompt = args.initial_prompt or config_prompt or None
+
     # Resolve Anthropic key
     anthropic_key = args.anthropic_key or os.environ.get("ANTHROPIC_API_KEY")
     if not args.no_notes and not anthropic_key:
@@ -389,6 +417,7 @@ def main():
     else:
         print("  System audio  : not found — recording microphone only")
     print(f"  Whisper model : {args.model}")
+    print(f"  Prompt hints  : {initial_prompt or '(none)'}")
     print(f"  Diarization   : {'yes' if args.diarize else 'no'}")
     print(f"  Key notes     : {'no (--no-notes)' if args.no_notes else 'yes (Claude API)'}")
     print()
@@ -445,7 +474,7 @@ def main():
     save_wav(wav_path, audio, args.samplerate)
     print(f"Audio saved to {wav_path}")
 
-    full_text, segments = transcribe_segments(wav_path, args.model, args.language)
+    full_text, segments = transcribe_segments(wav_path, args.model, args.language, initial_prompt)
 
     if args.diarize and segments:
         turns = diarize(wav_path, args.hf_token, args.num_speakers)

@@ -1,0 +1,8 @@
+# Words, names, and terms that Whisper should recognise correctly.
+# Add one entry per line, or comma-separate multiple entries on one line.
+# Lines starting with # are ignored.
+
+# People
+Jarrett, Ash, Nic
+
+# Add company names, product names, acronyms, or technical terms below:
