@@ -3,6 +3,7 @@
 # Lines starting with # are ignored.
 
 # People
-Jarrett, Ash, Nic
+Jarrett, Ash, Nic, Ryan, Rob, Stokes, Sharpy, Ashwin, Andrew, Patrick
 
 # Add company names, product names, acronyms, or technical terms below:
+GuidePoint, CrowdStrike, Tines, Proofpoint, SentinelOne
