@@ -4,3 +4,9 @@ openai-whisper>=20231117
 
 # Optional — only needed for --diarize
 # pyannote.audio>=3.1
+
+# sanitize.py dependencies
+spacy>=3.7
+faker>=24.0
+# After installing spacy, also run:
+#   python -m spacy download en_core_web_sm
