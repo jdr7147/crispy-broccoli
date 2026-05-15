@@ -156,6 +156,10 @@ def _should_replace_org(entity_text: str) -> bool:
     # Skip all-caps abbreviations (EDR, SIEM, SOC, TTPs …)
     if _ABBREV_RE.match(stripped):
         return False
+    # MITRE technique names use slash notation: Scheduled Task/Job,
+    # Phishing/Spearphishing, etc.  A slash is never part of a real company name.
+    if '/' in stripped:
+        return False
     # Skip blocklisted generic phrases (case-insensitive)
     if stripped.lower() in _ORG_BLOCKLIST:
         return False
@@ -203,6 +207,10 @@ def _rand_company() -> str:
 
 # ── substitution map ──────────────────────────────────────────────────────────
 
+# Leading articles are stripped before keying so "The Acme Corp" and "Acme Corp"
+# resolve to the same substitution.
+_ARTICLE_RE = re.compile(r'^\s*(?:the|an?)\s+', re.IGNORECASE)
+
 class _SubMap:
     """Tracks original→substitution pairs, deduplicating case-insensitively."""
 
@@ -210,7 +218,7 @@ class _SubMap:
         self._map: OrderedDict[str, tuple[str, str]] = OrderedDict()
 
     def get_or_create(self, original: str, generator) -> str:
-        key = original.lower()
+        key = _ARTICLE_RE.sub('', original).lower().strip()
         if key not in self._map:
             self._map[key] = (original, generator())
         return self._map[key][1]
