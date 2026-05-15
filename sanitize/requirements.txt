@@ -1,0 +1,11 @@
+sounddevice>=0.4.6
+numpy>=1.24
+openai-whisper>=20231117
+
+# Optional — only needed for --diarize
+# pyannote.audio>=3.1
+
+# sanitize.py dependencies
+faker>=24.0
+python-docx>=1.1
+pymupdf>=1.24

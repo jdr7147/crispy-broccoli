@@ -1,0 +1,9 @@
+# Words, names, and terms that Whisper should recognise correctly.
+# Add one entry per line, or comma-separate multiple entries on one line.
+# Lines starting with # are ignored.
+
+# People
+Jarrett, Ash, Nic, Ryan, Rob, Stokes, Sharpy, Ashwin, Andrew, Patrick
+
+# Add company names, product names, acronyms, or technical terms below:
+GuidePoint, CrowdStrike, Tines, Proofpoint, SentinelOne
