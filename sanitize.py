@@ -126,6 +126,41 @@ _IPV6_RE = re.compile(
 
 _MAC_RE = re.compile(r'\b(?:[0-9A-Fa-f]{2}[:\-]){5}[0-9A-Fa-f]{2}\b')
 
+# ── ORG entity filters (prevent spacy from over-firing on technical text) ─────
+
+# All-caps abbreviations: EDR, SIEM, SOC, TTP, IOC, XDR, etc.
+_ABBREV_RE = re.compile(r'^[A-Z]{2,8}s?$')
+
+# Generic terms that spacy commonly misclassifies as ORG in security documents.
+_ORG_BLOCKLIST: set[str] = {
+    # Document structure
+    'document history', 'table of contents', 'executive summary',
+    'introduction', 'background', 'overview', 'conclusion', 'appendix',
+    'references', 'revision history', 'change log', 'scope', 'purpose',
+    # Security concepts & generic phrases
+    'tactics and techniques', 'tactics, techniques, and procedures',
+    'tactics, techniques', 'indicators of compromise',
+    'threat intelligence', 'incident response', 'threat hunting',
+    'red team', 'blue team', 'purple team', 'penetration testing',
+    'vulnerability assessment', 'attack surface', 'kill chain',
+    'security operations', 'security operations center',
+    'defense in depth', 'zero trust',
+    # Generic organisational words that are not company names
+    'management', 'leadership', 'committee', 'department',
+    'division', 'unit', 'staff', 'personnel', 'administration',
+}
+
+def _should_replace_org(entity_text: str) -> bool:
+    """Return False for abbreviations and generic phrases that are not company names."""
+    stripped = entity_text.strip()
+    # Skip all-caps abbreviations (EDR, SIEM, SOC, TTPs …)
+    if _ABBREV_RE.match(stripped):
+        return False
+    # Skip blocklisted generic phrases (case-insensitive)
+    if stripped.lower() in _ORG_BLOCKLIST:
+        return False
+    return True
+
 # ── fallback word lists (used when faker is not installed) ────────────────────
 
 _FIRST_NAMES = [
@@ -227,6 +262,8 @@ def _ner_replace(text: str, sub_map: _SubMap, protected: set,
             continue
         s, e = ent.start_char, ent.end_char
         if _is_protected(s, e, protected):
+            continue
+        if ent.label_ == 'ORG' and not _should_replace_org(ent.text):
             continue
         parts.append(text[last:s])
         gen = _rand_person if ent.label_ == 'PERSON' else _rand_company
