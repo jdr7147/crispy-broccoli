@@ -150,18 +150,70 @@ _ORG_BLOCKLIST: set[str] = {
     'division', 'unit', 'staff', 'personnel', 'administration',
 }
 
+# Technology vendors and product companies that should never be replaced.
+# These appear constantly in security reports as tool/platform names, not as
+# the organisations whose identity needs protecting.
+_TECH_VENDORS: set[str] = {
+    # Cybersecurity — endpoint & XDR
+    'crowdstrike', 'sentinelone', 'carbon black', 'vmware carbon black',
+    'cylance', 'blackberry cylance', 'cortex xdr', 'trend micro',
+    'symantec', 'broadcom symantec', 'mcafee', 'trellix', 'eset',
+    'kaspersky', 'bitdefender', 'malwarebytes', 'avast', 'avg', 'norton',
+    'huntress', 'cybereason', 'darktrace', 'vectra', 'illumio',
+    # Cybersecurity — network & firewall
+    'palo alto networks', 'palo alto', 'fortinet', 'fortigate',
+    'check point', 'checkpoint', 'cisco', 'juniper', 'juniper networks',
+    'sonicwall', 'watchguard', 'barracuda', 'zscaler', 'netskope',
+    'cloudflare', 'akamai', 'f5', 'imperva',
+    # Cybersecurity — SIEM / SOAR / log management
+    'splunk', 'ibm qradar', 'qradar', 'microsoft sentinel', 'azure sentinel',
+    'logrhythm', 'exabeam', 'securonix', 'elastic', 'elasticsearch',
+    'sumo logic', 'alienvault', 'at&t cybersecurity',
+    # Cybersecurity — vulnerability management
+    'tenable', 'nessus', 'qualys', 'rapid7', 'nexpose', 'insightvm',
+    'bitsight', 'securityscorecard',
+    # Cybersecurity — threat intel & IR
+    'mandiant', 'fireeye', 'recorded future', 'threatconnect',
+    'anomali', 'isight', 'secureworks', 'trustwave',
+    # Cybersecurity — identity & PAM
+    'okta', 'duo', 'ping identity', 'cyberark', 'beyondtrust',
+    'thycotic', 'delinea', 'sailpoint', 'saviynt',
+    # Cybersecurity — email & web security
+    'proofpoint', 'mimecast', 'abnormal security', 'cofense',
+    # Cybersecurity — cloud security
+    'wiz', 'orca security', 'lacework', 'prisma cloud', 'aqua security',
+    'snyk', 'veracode', 'checkmarx', 'sonarqube',
+    # Cybersecurity — deception / other
+    'attivo', 'guardicore',
+    # Major tech — software & cloud
+    'microsoft', 'google', 'apple', 'amazon', 'meta', 'facebook',
+    'ibm', 'oracle', 'sap', 'salesforce', 'servicenow', 'adobe',
+    'slack', 'zoom', 'atlassian', 'jira', 'confluence',
+    # Major tech — hardware & infrastructure
+    'intel', 'amd', 'nvidia', 'qualcomm', 'arm',
+    'dell', 'hp', 'hpe', 'lenovo', 'aruba',
+    # Virtualisation & cloud platforms
+    'vmware', 'broadcom', 'aws', 'azure', 'gcp', 'google cloud',
+    'red hat', 'suse', 'canonical', 'ubuntu', 'debian',
+    # Networking & comms
+    'arista', 'netscout', 'opengear',
+}
+
 def _should_replace_org(entity_text: str) -> bool:
-    """Return False for abbreviations and generic phrases that are not company names."""
+    """Return False for tech vendors, abbreviations, and generic phrases."""
     stripped = entity_text.strip()
     # Skip all-caps abbreviations (EDR, SIEM, SOC, TTPs …)
     if _ABBREV_RE.match(stripped):
         return False
-    # MITRE technique names use slash notation: Scheduled Task/Job,
-    # Phishing/Spearphishing, etc.  A slash is never part of a real company name.
+    # MITRE technique names use slash notation: Scheduled Task/Job, etc.
     if '/' in stripped:
         return False
-    # Skip blocklisted generic phrases (case-insensitive)
-    if stripped.lower() in _ORG_BLOCKLIST:
+    lower = stripped.lower()
+    # Skip known technology vendors and product companies
+    if lower in _TECH_VENDORS:
+        return False
+    # Skip blocklisted generic phrases
+    if lower in _ORG_BLOCKLIST:
         return False
     return True
 
