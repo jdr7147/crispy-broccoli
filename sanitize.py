@@ -204,47 +204,37 @@ _TECH_VENDORS: set[str] = {
     'arista', 'netscout', 'opengear',
 }
 
-def _should_replace_org(entity_text: str) -> bool:
-    """Return False for tech vendors, abbreviations, and generic phrases."""
-    stripped = entity_text.strip()
-    # Skip all-caps abbreviations (EDR, SIEM, SOC, TTPs …)
-    if _ABBREV_RE.match(stripped):
-        return False
-    # MITRE technique names use slash notation: Scheduled Task/Job, etc.
-    if '/' in stripped:
-        return False
-    # " - " and "+" are product/feature naming conventions, not company names
-    # e.g. "Enterprise+ - Compliance Management", "Custom LogRhythm Syntax - Admin User"
-    if ' - ' in stripped or '+' in stripped:
-        return False
-    lower = stripped.lower()
-    # Skip known technology vendors and product companies
-    if lower in _TECH_VENDORS:
-        return False
-    # Skip blocklisted generic phrases
-    if lower in _ORG_BLOCKLIST:
-        return False
-    return True
-
-
-# Words that cannot appear in a real person's name.  Used to reject spacy PERSON
-# entities that are actually section headers, product names, or generic phrases.
-_NON_NAME_WORDS: set[str] = {
+# Words that flag an entity as a technical term, section header, or product
+# label rather than a real person or company name.  Applied at the word level
+# to both PERSON and ORG entities so a single list covers both filters.
+_BLOCKED_WORDS: set[str] = {
+    # MITRE tactics
+    'reconnaissance', 'execution', 'persistence', 'escalation', 'evasion',
+    'exfiltration', 'collection', 'discovery', 'impact',
+    # MITRE technique component words
+    'technique', 'techniques', 'tactic', 'tactics', 'privilege', 'lateral',
+    'movement', 'credential', 'defenses', 'defence', 'logon', 'autostart',
+    'startup', 'registry', 'boot', 'modify', 'impair', 'keys', 'folder',
+    # Security operation verbs / nouns
+    'remediate', 'remediation', 'mitigate', 'mitigation',
+    'detect', 'detection', 'respond', 'response', 'recover', 'recovery',
+    'monitor', 'monitoring', 'alert',
     # Document / report structure
     'project', 'contacts', 'contact', 'closing', 'remarks', 'remark',
     'document', 'history', 'summary', 'overview', 'introduction',
     'conclusion', 'appendix', 'references', 'scope', 'purpose',
-    'section', 'chapter', 'agenda', 'minutes', 'notes',
+    'section', 'chapter', 'agenda', 'minutes', 'notes', 'table',
     # Product / feature language
     'enterprise', 'advanced', 'custom', 'standard', 'professional',
     'management', 'analytics', 'insights', 'compliance', 'operations',
     'syntax', 'admin', 'user', 'users', 'module', 'platform',
     'service', 'services', 'solution', 'solutions', 'system', 'systems',
     'feature', 'component', 'dashboard', 'reporting', 'report',
-    'mitigate', 'detect', 'respond', 'recover', 'monitor',
-    # Other common false-positive triggers
+    # Generic IT / network terms
+    'network', 'device', 'cli', 'run',
+    # Other
     'recommendations', 'findings', 'methodology', 'timeline',
-    'next', 'steps', 'action', 'items',
+    'action', 'items', 'next', 'steps',
 }
 
 # Only letters, spaces, hyphens, apostrophes, and periods (for initials/titles).
@@ -256,9 +246,42 @@ def _should_replace_person(entity_text: str) -> bool:
     # Must contain only characters that appear in real names
     if not _VALID_NAME_RE.match(stripped):
         return False
-    # Reject if any word is clearly not part of a person's name
-    words = {w.lower() for w in stripped.split()}
-    if words & _NON_NAME_WORDS:
+    words_list = stripped.split()
+    # Single-word entities are almost never genuine person names in security reports
+    if len(words_list) < 2:
+        return False
+    # Strip trailing punctuation (e.g. "A." → "a") before checking
+    words = {w.lower().rstrip('.') for w in words_list}
+    if words & _BLOCKED_WORDS:
+        return False
+    return True
+
+
+def _should_replace_org(entity_text: str) -> bool:
+    """Return False for tech vendors, abbreviations, and generic phrases."""
+    stripped = entity_text.strip()
+    # Skip all-caps abbreviations (EDR, SIEM, SOC, TTPs …)
+    if _ABBREV_RE.match(stripped):
+        return False
+    # MITRE technique names use slash notation: Scheduled Task/Job, etc.
+    if '/' in stripped:
+        return False
+    # " - " and "+" are product/feature naming conventions, not company names
+    if ' - ' in stripped or '+' in stripped:
+        return False
+    lower = stripped.lower()
+    # Exact vendor match
+    if lower in _TECH_VENDORS:
+        return False
+    # Vendor + product suffix: "SentinelOne Singularity", "Splunk SIEM", etc.
+    if any(lower.startswith(v + ' ') for v in _TECH_VENDORS):
+        return False
+    # Exact generic-phrase match
+    if lower in _ORG_BLOCKLIST:
+        return False
+    # Word-level check: any word that marks this as a technical / document term
+    org_words = {w.lower().rstrip('.,;:') for w in stripped.split()}
+    if org_words & _BLOCKED_WORDS:
         return False
     return True
 
