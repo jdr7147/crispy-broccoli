@@ -5,19 +5,26 @@ sanitize.py — Document sanitizer for security reports and transcripts.
 Randomizes IPv4/IPv6 addresses, MAC addresses, people names, and company names.
 All substitutions are logged to a companion file as "original :: substitution".
 
+Supported formats:  .txt  .md  .csv  .log  (plain text)
+                    .docx               (requires python-docx)
+                    .pdf                (requires pymupdf)
+
 Preserved (never replaced):
   - MITRE ATT&CK identifiers  (T1059, T1059.003, TA0002, M1049)
   - APT / threat-actor names   (APT28, Lazarus Group, Fancy Bear, …)
   - Four-digit years           (2021, 2024, …)
 
 Dependencies:
-  pip install spacy faker
+  pip install spacy faker python-docx pymupdf
   python -m spacy download en_core_web_sm
 
-spacy and faker are both optional: the script degrades gracefully.
-  - Without faker  → built-in word lists are used for random names/companies.
-  - Without spacy  → only IPs and MACs are replaced; names/companies are skipped
-                     unless --names-file / --companies-file are provided.
+spacy, faker, python-docx, and pymupdf are all optional; the script degrades
+gracefully when any of them are absent.
+  - Without faker    → built-in word lists are used for random names/companies.
+  - Without spacy    → only IPs and MACs are replaced; names/companies are skipped
+                       unless --names / --companies are also provided.
+  - Without python-docx → .docx files cannot be processed.
+  - Without pymupdf     → .pdf files cannot be processed.
 """
 
 import re
@@ -41,6 +48,18 @@ try:
     _FAKER = True
 except ImportError:
     _FAKER = False
+
+try:
+    import docx as _docx_mod          # python-docx
+    _DOCX = True
+except ImportError:
+    _DOCX = False
+
+try:
+    import fitz as _fitz_mod          # PyMuPDF
+    _PDF = True
+except ImportError:
+    _PDF = False
 
 # ── patterns: what to PRESERVE ───────────────────────────────────────────────
 
@@ -243,6 +262,72 @@ def _load_spacy_model(model: str = 'en_core_web_sm'):
             )
     return _nlp_cache
 
+# ── apply-back helper (used for docx runs and pdf pages) ─────────────────────
+
+def _apply_substitutions(text: str, pairs: list[tuple[str, str]]) -> str:
+    """Apply substitution pairs to a text fragment, longest match first."""
+    for orig, repl in sorted(pairs, key=lambda x: len(x[0]), reverse=True):
+        text = re.sub(re.escape(orig), repl, text, flags=re.IGNORECASE)
+    return text
+
+# ── docx support ──────────────────────────────────────────────────────────────
+
+def _iter_docx_paragraphs(doc):
+    """Yield every paragraph in a docx document: body, tables, headers, footers."""
+    yield from doc.paragraphs
+    for table in doc.tables:
+        for row in table.rows:
+            for cell in row.cells:
+                yield from cell.paragraphs
+    for section in doc.sections:
+        yield from section.header.paragraphs
+        yield from section.footer.paragraphs
+
+def _extract_text_docx(path: Path) -> str:
+    import docx
+    doc = docx.Document(str(path))
+    return '\n'.join(p.text for p in _iter_docx_paragraphs(doc))
+
+def _write_sanitized_docx(in_path: Path, out_path: Path,
+                           pairs: list[tuple[str, str]]) -> None:
+    import docx
+    doc = docx.Document(str(in_path))
+    for para in _iter_docx_paragraphs(doc):
+        for run in para.runs:
+            if run.text:
+                run.text = _apply_substitutions(run.text, pairs)
+    doc.save(str(out_path))
+
+# ── pdf support ───────────────────────────────────────────────────────────────
+
+def _extract_text_pdf(path: Path) -> str:
+    import fitz
+    doc = fitz.open(str(path))
+    try:
+        return '\n'.join(page.get_text() for page in doc)
+    finally:
+        doc.close()
+
+def _write_sanitized_pdf(in_path: Path, out_path: Path,
+                          pairs: list[tuple[str, str]]) -> None:
+    import fitz
+    doc = fitz.open(str(in_path))
+    try:
+        # Sort longest-first so "John Smith" is redacted before "John".
+        sorted_pairs = sorted(pairs, key=lambda x: len(x[0]), reverse=True)
+        for page in doc:
+            for orig, repl in sorted_pairs:
+                hits = page.search_for(orig, quads=False)
+                for rect in hits:
+                    page.add_redact_annot(rect, text=repl,
+                                          fontname='helv', fontsize=0,
+                                          align=fitz.TEXT_ALIGN_LEFT)
+            # images=PDF_REDACT_IMAGE_NONE leaves embedded images untouched.
+            page.apply_redactions(images=fitz.PDF_REDACT_IMAGE_NONE)
+        doc.save(str(out_path), garbage=4, deflate=True)
+    finally:
+        doc.close()
+
 # ── public API ────────────────────────────────────────────────────────────────
 
 def sanitize(
@@ -289,6 +374,8 @@ def sanitize(
 
 # ── CLI ───────────────────────────────────────────────────────────────────────
 
+_PLAIN_TEXT_SUFFIXES = {'.txt', '.md', '.csv', '.log', '.json', '.yaml', '.yml'}
+
 def main() -> None:
     parser = argparse.ArgumentParser(
         description='Sanitize a document: randomize IPs, MACs, names, and companies.',
@@ -329,13 +416,13 @@ def main() -> None:
     if not in_path.exists():
         sys.exit(f'Error: file not found: {in_path}')
 
-    stem, suffix = in_path.stem, in_path.suffix
-    out_path  = Path(args.output)       if args.output       else in_path.parent / f'{stem}.sanitized{suffix}'
+    suffix = in_path.suffix.lower()
+    stem   = in_path.stem
+    out_path  = Path(args.output)        if args.output        else in_path.parent / f'{stem}.sanitized{in_path.suffix}'
     subs_path = Path(args.substitutions) if args.substitutions else in_path.parent / f'{stem}.substitutions.txt'
 
     extra_names:     list[str] = []
     extra_companies: list[str] = []
-
     if args.names:
         extra_names = [l.strip() for l in Path(args.names).read_text(encoding='utf-8').splitlines() if l.strip()]
     if args.companies:
@@ -350,16 +437,42 @@ def main() -> None:
             file=sys.stderr,
         )
 
-    text = in_path.read_text(encoding='utf-8', errors='replace')
-    sanitized, substitutions = sanitize(
-        text,
-        use_ner=use_ner,
-        spacy_model=args.spacy_model,
-        extra_names=extra_names or None,
-        extra_companies=extra_companies or None,
-    )
+    # ── dispatch by format ────────────────────────────────────────────────────
 
-    out_path.write_text(sanitized, encoding='utf-8')
+    if suffix == '.docx':
+        if not _DOCX:
+            sys.exit('Error: python-docx is required for .docx files.\n'
+                     'Install with:  pip install python-docx')
+        source_text = _extract_text_docx(in_path)
+        _, substitutions = sanitize(
+            source_text, use_ner=use_ner, spacy_model=args.spacy_model,
+            extra_names=extra_names or None, extra_companies=extra_companies or None,
+        )
+        _write_sanitized_docx(in_path, out_path, substitutions)
+
+    elif suffix == '.pdf':
+        if not _PDF:
+            sys.exit('Error: pymupdf is required for .pdf files.\n'
+                     'Install with:  pip install pymupdf')
+        source_text = _extract_text_pdf(in_path)
+        _, substitutions = sanitize(
+            source_text, use_ner=use_ner, spacy_model=args.spacy_model,
+            extra_names=extra_names or None, extra_companies=extra_companies or None,
+        )
+        _write_sanitized_pdf(in_path, out_path, substitutions)
+
+    else:
+        # Plain text (and any unrecognised extension — treat as UTF-8 text)
+        if suffix not in _PLAIN_TEXT_SUFFIXES:
+            print(f'[info] Unrecognised extension "{suffix}" — treating as plain text.',
+                  file=sys.stderr)
+        text = in_path.read_text(encoding='utf-8', errors='replace')
+        sanitized, substitutions = sanitize(
+            text, use_ner=use_ner, spacy_model=args.spacy_model,
+            extra_names=extra_names or None, extra_companies=extra_companies or None,
+        )
+        out_path.write_text(sanitized, encoding='utf-8')
+
     print(f'Sanitized document → {out_path}')
 
     if substitutions:
