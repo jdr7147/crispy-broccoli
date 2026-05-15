@@ -2,29 +2,33 @@
 """
 sanitize.py — Document sanitizer for security reports and transcripts.
 
-Randomizes IPv4/IPv6 addresses, MAC addresses, people names, and company names.
+Automatically replaces IPv4/IPv6 addresses and MAC addresses with random
+substitutes.  People names and company names are replaced only when you
+explicitly specify them on the command line.
+
 All substitutions are logged to a companion file as "original :: substitution".
 
-Supported formats:  .txt  .md  .csv  .log  (plain text)
-                    .docx               (requires python-docx)
-                    .pdf                (requires pymupdf)
+Supported formats:  .txt  .md  .csv  .log  and any plain-text file
+                    .docx  (requires python-docx)
+                    .pdf   (requires pymupdf)
 
 Preserved (never replaced):
   - MITRE ATT&CK identifiers  (T1059, T1059.003, TA0002, M1049)
   - APT / threat-actor names   (APT28, Lazarus Group, Fancy Bear, …)
   - Four-digit years           (2021, 2024, …)
 
-Dependencies:
-  pip install spacy faker python-docx pymupdf
-  python -m spacy download en_core_web_sm
+Usage examples:
+  python sanitize.py report.txt
+  python sanitize.py report.txt --names "John Smith" "Jane Doe"
+  python sanitize.py report.txt --companies "Acme Corp" "North Carolina Farm Bureau"
+  python sanitize.py report.txt --names "John Smith" --companies "Acme Corp" --names-file more_names.txt
+  python sanitize.py report.docx -o clean_report.docx
 
-spacy, faker, python-docx, and pymupdf are all optional; the script degrades
-gracefully when any of them are absent.
-  - Without faker    → built-in word lists are used for random names/companies.
-  - Without spacy    → only IPs and MACs are replaced; names/companies are skipped
-                       unless --names / --companies are also provided.
+Dependencies (all optional):
+  pip install faker python-docx pymupdf
+  - Without faker      → built-in word lists generate replacement names/companies.
   - Without python-docx → .docx files cannot be processed.
-  - Without pymupdf     → .pdf files cannot be processed.
+  - Without pymupdf    → .pdf files cannot be processed.
 """
 
 import re
@@ -35,12 +39,6 @@ from pathlib import Path
 from collections import OrderedDict
 
 # ── optional dependencies ─────────────────────────────────────────────────────
-
-try:
-    import spacy as _spacy_mod
-    _SPACY = True
-except ImportError:
-    _SPACY = False
 
 try:
     from faker import Faker as _Faker
@@ -100,7 +98,7 @@ _APT_RE = re.compile(r'\b(?:' + _APT_NAMES + r')\b', re.IGNORECASE)
 # Four-digit years 1900–2099
 _YEAR_RE = re.compile(r'\b(?:19|20)\d{2}\b')
 
-# ── patterns: what to DETECT & REPLACE ───────────────────────────────────────
+# ── patterns: what to AUTO-DETECT & REPLACE ──────────────────────────────────
 
 _IPV4_RE = re.compile(
     r'\b(?:(?:25[0-5]|2[0-4]\d|[01]?\d\d?)\.){3}(?:25[0-5]|2[0-4]\d|[01]?\d\d?)\b'
@@ -108,183 +106,23 @@ _IPV4_RE = re.compile(
 
 # Covers full 8-group, compressed (::), and common abbreviated forms
 _IPV6_RE = re.compile(
-    r'(?<![:\w])'                          # not preceded by colon or word char
+    r'(?<![:\w])'
     r'('
-    r'(?:[0-9a-fA-F]{1,4}:){7}[0-9a-fA-F]{1,4}'          # full
-    r'|(?:[0-9a-fA-F]{1,4}:){1,7}:'                       # trailing ::
-    r'|:(?::[0-9a-fA-F]{1,4}){1,7}'                       # leading ::
-    r'|(?:[0-9a-fA-F]{1,4}:){1,6}:[0-9a-fA-F]{1,4}'      # one :: compressed
+    r'(?:[0-9a-fA-F]{1,4}:){7}[0-9a-fA-F]{1,4}'
+    r'|(?:[0-9a-fA-F]{1,4}:){1,7}:'
+    r'|:(?::[0-9a-fA-F]{1,4}){1,7}'
+    r'|(?:[0-9a-fA-F]{1,4}:){1,6}:[0-9a-fA-F]{1,4}'
     r'|(?:[0-9a-fA-F]{1,4}:){1,5}(?::[0-9a-fA-F]{1,4}){1,2}'
     r'|(?:[0-9a-fA-F]{1,4}:){1,4}(?::[0-9a-fA-F]{1,4}){1,3}'
     r'|(?:[0-9a-fA-F]{1,4}:){1,3}(?::[0-9a-fA-F]{1,4}){1,4}'
     r'|(?:[0-9a-fA-F]{1,4}:){1,2}(?::[0-9a-fA-F]{1,4}){1,5}'
     r'|[0-9a-fA-F]{1,4}:(?::[0-9a-fA-F]{1,4}){1,6}'
-    r'|::(?:[fF]{4}:)?(?:\d{1,3}\.){3}\d{1,3}'            # IPv4-mapped
+    r'|::(?:[fF]{4}:)?(?:\d{1,3}\.){3}\d{1,3}'
     r')'
     r'(?![:\w])'
 )
 
 _MAC_RE = re.compile(r'\b(?:[0-9A-Fa-f]{2}[:\-]){5}[0-9A-Fa-f]{2}\b')
-
-# ── ORG entity filters (prevent spacy from over-firing on technical text) ─────
-
-# All-caps abbreviations: EDR, SIEM, SOC, TTP, IOC, XDR, etc.
-_ABBREV_RE = re.compile(r'^[A-Z]{2,8}s?$')
-
-# Generic terms that spacy commonly misclassifies as ORG in security documents.
-_ORG_BLOCKLIST: set[str] = {
-    # Document structure
-    'document history', 'table of contents', 'executive summary',
-    'introduction', 'background', 'overview', 'conclusion', 'appendix',
-    'references', 'revision history', 'change log', 'scope', 'purpose',
-    # Security concepts & generic phrases
-    'tactics and techniques', 'tactics, techniques, and procedures',
-    'tactics, techniques', 'indicators of compromise',
-    'threat intelligence', 'incident response', 'threat hunting',
-    'red team', 'blue team', 'purple team', 'penetration testing',
-    'vulnerability assessment', 'attack surface', 'kill chain',
-    'security operations', 'security operations center',
-    'defense in depth', 'zero trust',
-    # Generic organisational words that are not company names
-    'management', 'leadership', 'committee', 'department',
-    'division', 'unit', 'staff', 'personnel', 'administration',
-}
-
-# Technology vendors and product companies that should never be replaced.
-# These appear constantly in security reports as tool/platform names, not as
-# the organisations whose identity needs protecting.
-_TECH_VENDORS: set[str] = {
-    # Cybersecurity — endpoint & XDR
-    'crowdstrike', 'sentinelone', 'carbon black', 'vmware carbon black',
-    'cylance', 'blackberry cylance', 'cortex xdr', 'trend micro',
-    'symantec', 'broadcom symantec', 'mcafee', 'trellix', 'eset',
-    'kaspersky', 'bitdefender', 'malwarebytes', 'avast', 'avg', 'norton',
-    'huntress', 'cybereason', 'darktrace', 'vectra', 'illumio',
-    # Cybersecurity — network & firewall
-    'palo alto networks', 'palo alto', 'fortinet', 'fortigate',
-    'check point', 'checkpoint', 'cisco', 'juniper', 'juniper networks',
-    'sonicwall', 'watchguard', 'barracuda', 'zscaler', 'netskope',
-    'cloudflare', 'akamai', 'f5', 'imperva',
-    # Cybersecurity — SIEM / SOAR / log management
-    'splunk', 'ibm qradar', 'qradar', 'microsoft sentinel', 'azure sentinel',
-    'logrhythm', 'exabeam', 'securonix', 'elastic', 'elasticsearch',
-    'sumo logic', 'alienvault', 'at&t cybersecurity',
-    # Cybersecurity — vulnerability management
-    'tenable', 'nessus', 'qualys', 'rapid7', 'nexpose', 'insightvm',
-    'bitsight', 'securityscorecard',
-    # Cybersecurity — threat intel & IR
-    'mandiant', 'fireeye', 'recorded future', 'threatconnect',
-    'anomali', 'isight', 'secureworks', 'trustwave',
-    # Cybersecurity — identity & PAM
-    'okta', 'duo', 'ping identity', 'cyberark', 'beyondtrust',
-    'thycotic', 'delinea', 'sailpoint', 'saviynt',
-    # Cybersecurity — email & web security
-    'proofpoint', 'mimecast', 'abnormal security', 'cofense',
-    # Cybersecurity — cloud security
-    'wiz', 'orca security', 'lacework', 'prisma cloud', 'aqua security',
-    'snyk', 'veracode', 'checkmarx', 'sonarqube',
-    # Cybersecurity — deception / other
-    'attivo', 'guardicore',
-    # MSSPs / consulting (security-specific)
-    'guidepoint', 'guidepoint security',
-    'optiv', 'ntt security', 'herjavec group', 'coalfire',
-    'bishopfox', 'bishop fox', 'nccgroup', 'ncc group',
-    'withsecure', 'f-secure',
-    # Major tech — software & cloud
-    'microsoft', 'google', 'apple', 'amazon', 'meta', 'facebook',
-    'ibm', 'oracle', 'sap', 'salesforce', 'servicenow', 'adobe',
-    'slack', 'zoom', 'atlassian', 'jira', 'confluence',
-    # Major tech — hardware & infrastructure
-    'intel', 'amd', 'nvidia', 'qualcomm', 'arm',
-    'dell', 'hp', 'hpe', 'lenovo', 'aruba',
-    # Virtualisation & cloud platforms
-    'vmware', 'broadcom', 'aws', 'azure', 'gcp', 'google cloud',
-    'red hat', 'suse', 'canonical', 'ubuntu', 'debian',
-    # Networking & comms
-    'arista', 'netscout', 'opengear',
-}
-
-# Words that flag an entity as a technical term, section header, or product
-# label rather than a real person or company name.  Applied at the word level
-# to both PERSON and ORG entities so a single list covers both filters.
-_BLOCKED_WORDS: set[str] = {
-    # MITRE tactics
-    'reconnaissance', 'execution', 'persistence', 'escalation', 'evasion',
-    'exfiltration', 'collection', 'discovery', 'impact',
-    # MITRE technique component words
-    'technique', 'techniques', 'tactic', 'tactics', 'privilege', 'lateral',
-    'movement', 'credential', 'defenses', 'defence', 'logon', 'autostart',
-    'startup', 'registry', 'boot', 'modify', 'impair', 'keys', 'folder',
-    # Security operation verbs / nouns
-    'remediate', 'remediation', 'mitigate', 'mitigation',
-    'detect', 'detection', 'respond', 'response', 'recover', 'recovery',
-    'monitor', 'monitoring', 'alert',
-    # Document / report structure
-    'project', 'contacts', 'contact', 'closing', 'remarks', 'remark',
-    'document', 'history', 'summary', 'overview', 'introduction',
-    'conclusion', 'appendix', 'references', 'scope', 'purpose',
-    'section', 'chapter', 'agenda', 'minutes', 'notes', 'table',
-    # Product / feature language
-    'enterprise', 'advanced', 'custom', 'standard', 'professional',
-    'management', 'analytics', 'insights', 'compliance', 'operations',
-    'syntax', 'admin', 'user', 'users', 'module', 'platform',
-    'service', 'services', 'solution', 'solutions', 'system', 'systems',
-    'feature', 'component', 'dashboard', 'reporting', 'report',
-    # Generic IT / network terms
-    'network', 'device', 'cli', 'run',
-    # Other
-    'recommendations', 'findings', 'methodology', 'timeline',
-    'action', 'items', 'next', 'steps',
-}
-
-# Only letters, spaces, hyphens, apostrophes, and periods (for initials/titles).
-_VALID_NAME_RE = re.compile(r"^[A-Za-z][A-Za-z '\-\.]+$")
-
-def _should_replace_person(entity_text: str) -> bool:
-    """Return False for entities that cannot plausibly be a real person's name."""
-    stripped = entity_text.strip()
-    # Must contain only characters that appear in real names
-    if not _VALID_NAME_RE.match(stripped):
-        return False
-    words_list = stripped.split()
-    # Single-word entities are almost never genuine person names in security reports
-    if len(words_list) < 2:
-        return False
-    # Strip trailing punctuation (e.g. "A." → "a") before checking
-    words = {w.lower().rstrip('.') for w in words_list}
-    if words & _BLOCKED_WORDS:
-        return False
-    return True
-
-
-def _should_replace_org(entity_text: str) -> bool:
-    """Return False for tech vendors, abbreviations, and generic phrases."""
-    stripped = entity_text.strip()
-    # Skip all-caps abbreviations (EDR, SIEM, SOC, TTPs …)
-    if _ABBREV_RE.match(stripped):
-        return False
-    # MITRE technique names use slash notation: Scheduled Task/Job, etc.
-    if '/' in stripped:
-        return False
-    # " - " and "+" are product/feature naming conventions, not company names
-    if ' - ' in stripped or '+' in stripped:
-        return False
-    lower = stripped.lower()
-    # Exact vendor match
-    if lower in _TECH_VENDORS:
-        return False
-    # Vendor + product suffix: "SentinelOne Singularity", "Splunk SIEM", etc.
-    if any(lower.startswith(v + ' ') for v in _TECH_VENDORS):
-        return False
-    # Exact generic-phrase match
-    if lower in _ORG_BLOCKLIST:
-        return False
-    # Word-level check: any word that marks this as a technical / document term
-    org_words = {w.lower().rstrip('.,;:') for w in stripped.split()}
-    if org_words & _BLOCKED_WORDS:
-        return False
-    return True
-
 
 # ── fallback word lists (used when faker is not installed) ────────────────────
 
@@ -350,9 +188,8 @@ class _SubMap:
 # ── protected-span helpers ────────────────────────────────────────────────────
 
 def _build_protected(text: str, include_years: bool = True) -> set[tuple[int, int]]:
-    # Years are only excluded from NER replacement, not from IP/MAC replacement.
-    # Including years when protecting IPs would cause IPv6 addresses containing
-    # year-like substrings (e.g. "2001:db8::") to be skipped incorrectly.
+    # Years are excluded when protecting IPs: year-like substrings inside IPv6
+    # addresses (e.g. "2001" in 2001:db8::) must not block IP replacement.
     patterns = [_MITRE_RE, _APT_RE]
     if include_years:
         patterns.append(_YEAR_RE)
@@ -382,53 +219,14 @@ def _regex_replace(text: str, pattern: re.Pattern, generator,
     return ''.join(parts)
 
 
-def _ner_replace(text: str, sub_map: _SubMap, protected: set,
-                 nlp) -> str:
-    doc = nlp(text)
-    parts, last = [], 0
-    for ent in doc.ents:
-        if ent.label_ not in ('PERSON', 'ORG'):
-            continue
-        s, e = ent.start_char, ent.end_char
-        if _is_protected(s, e, protected):
-            continue
-        if ent.label_ == 'PERSON' and not _should_replace_person(ent.text):
-            continue
-        if ent.label_ == 'ORG' and not _should_replace_org(ent.text):
-            continue
-        parts.append(text[last:s])
-        gen = _rand_person if ent.label_ == 'PERSON' else _rand_company
-        parts.append(sub_map.get_or_create(ent.text, gen))
-        last = e
-    parts.append(text[last:])
-    return ''.join(parts)
-
-
 def _wordlist_replace(text: str, words: list[str], generator,
                       sub_map: _SubMap, protected: set) -> str:
-    """Verbatim whole-word replacement from an explicit list (fallback for no-NER mode)."""
+    """Whole-word, case-insensitive replacement for an explicit list of terms."""
     for word in sorted(words, key=len, reverse=True):  # longest-first avoids partial matches
         pattern = re.compile(r'\b' + re.escape(word) + r'\b', re.IGNORECASE)
         text = _regex_replace(text, pattern, generator, sub_map, protected)
-        protected = _build_protected(text)
+        protected = _build_protected(text, include_years=True)
     return text
-
-# ── spacy loader (cached) ─────────────────────────────────────────────────────
-
-_nlp_cache = None
-
-def _load_spacy_model(model: str = 'en_core_web_sm'):
-    global _nlp_cache
-    if _nlp_cache is None:
-        import spacy
-        try:
-            _nlp_cache = spacy.load(model)
-        except OSError:
-            raise RuntimeError(
-                f'spacy model "{model}" not found.\n'
-                f'Run:  python -m spacy download {model}'
-            )
-    return _nlp_cache
 
 # ── apply-back helper (used for docx runs and pdf pages) ─────────────────────
 
@@ -481,7 +279,6 @@ def _write_sanitized_pdf(in_path: Path, out_path: Path,
     import fitz
     doc = fitz.open(str(in_path))
     try:
-        # Sort longest-first so "John Smith" is redacted before "John".
         sorted_pairs = sorted(pairs, key=lambda x: len(x[0]), reverse=True)
         for page in doc:
             for orig, repl in sorted_pairs:
@@ -490,7 +287,6 @@ def _write_sanitized_pdf(in_path: Path, out_path: Path,
                     page.add_redact_annot(rect, text=repl,
                                           fontname='helv', fontsize=0,
                                           align=fitz.TEXT_ALIGN_LEFT)
-            # images=PDF_REDACT_IMAGE_NONE leaves embedded images untouched.
             page.apply_redactions(images=fitz.PDF_REDACT_IMAGE_NONE)
         doc.save(str(out_path), garbage=4, deflate=True)
     finally:
@@ -501,42 +297,30 @@ def _write_sanitized_pdf(in_path: Path, out_path: Path,
 def sanitize(
     text: str,
     *,
-    use_ner: bool = True,
-    spacy_model: str = 'en_core_web_sm',
-    extra_names: list[str] | None = None,
-    extra_companies: list[str] | None = None,
+    names: list[str] | None = None,
+    companies: list[str] | None = None,
 ) -> tuple[str, list[tuple[str, str]]]:
     """
     Sanitize *text* and return (sanitized_text, substitution_pairs).
 
-    substitution_pairs is a list of (original, replacement) tuples in
-    first-seen order.
+    IPs and MACs are always replaced automatically.  Names and companies are
+    only replaced when explicitly provided.
     """
     sub_map = _SubMap()
 
-    # 1. Regex: IPs then MACs (unambiguous)
-    # Years are intentionally excluded from protection here: year-like substrings
-    # (e.g. "2001" in an IPv6 address) must not block IP replacement.
+    # 1. IPs and MACs — auto-detected, years not protected here to avoid
+    #    blocking IPv6 addresses that contain year-like substrings (e.g. 2001:db8::)
     for pattern, gen in [(_IPV4_RE, _rand_ipv4), (_IPV6_RE, _rand_ipv6), (_MAC_RE, _rand_mac)]:
         protected = _build_protected(text, include_years=False)
         text = _regex_replace(text, pattern, gen, sub_map, protected)
 
-    # 2. NER: names and companies (years ARE protected here)
-    if use_ner and _SPACY:
-        try:
-            nlp = _load_spacy_model(spacy_model)
-            protected = _build_protected(text, include_years=True)
-            text = _ner_replace(text, sub_map, protected, nlp)
-        except RuntimeError as exc:
-            print(f'[warn] {exc}', file=sys.stderr)
-
-    # 3. Explicit word-list fallback / supplement
+    # 2. Explicit proper nouns — years ARE protected here
     protected = _build_protected(text, include_years=True)
-    if extra_names:
-        text = _wordlist_replace(text, extra_names, _rand_person, sub_map, protected)
+    if names:
+        text = _wordlist_replace(text, names, _rand_person, sub_map, protected)
         protected = _build_protected(text, include_years=True)
-    if extra_companies:
-        text = _wordlist_replace(text, extra_companies, _rand_company, sub_map, protected)
+    if companies:
+        text = _wordlist_replace(text, companies, _rand_company, sub_map, protected)
 
     return text, sub_map.pairs()
 
@@ -546,7 +330,10 @@ _PLAIN_TEXT_SUFFIXES = {'.txt', '.md', '.csv', '.log', '.json', '.yaml', '.yml'}
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description='Sanitize a document: randomize IPs, MACs, names, and companies.',
+        description=(
+            'Sanitize a document. IPs and MACs are replaced automatically. '
+            'Names and companies are replaced only when specified.'
+        ),
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=__doc__,
     )
@@ -560,23 +347,22 @@ def main() -> None:
         help='Substitutions log path (default: <input>.substitutions.txt).',
     )
     parser.add_argument(
-        '--no-ner', action='store_true',
-        help='Skip NER-based name/company replacement. Only IPs and MACs are replaced '
-             'unless --names or --companies are also provided.',
+        '--names', nargs='+', metavar='NAME', default=[],
+        help='Person name(s) to replace. Repeat or space-separate multiple values. '
+             'Example: --names "John Smith" "Jane Doe"',
     )
     parser.add_argument(
-        '--spacy-model', default='en_core_web_sm', metavar='MODEL',
-        help='spacy model to use for NER (default: en_core_web_sm). '
-             'Larger models (en_core_web_md, en_core_web_lg) are more accurate.',
+        '--companies', nargs='+', metavar='COMPANY', default=[],
+        help='Company name(s) to replace. '
+             'Example: --companies "Acme Corp" "North Carolina Farm Bureau"',
     )
     parser.add_argument(
-        '--names', metavar='FILE',
-        help='Plain-text file with one person name per line to replace '
-             '(used in addition to NER, or as a fallback when --no-ner is set).',
+        '--names-file', metavar='FILE',
+        help='Plain-text file with one person name per line (combined with --names).',
     )
     parser.add_argument(
-        '--companies', metavar='FILE',
-        help='Plain-text file with one company name per line to replace.',
+        '--companies-file', metavar='FILE',
+        help='Plain-text file with one company name per line (combined with --companies).',
     )
     args = parser.parse_args()
 
@@ -585,25 +371,16 @@ def main() -> None:
         sys.exit(f'Error: file not found: {in_path}')
 
     suffix = in_path.suffix.lower()
-    stem   = in_path.stem
-    out_path  = Path(args.output)        if args.output        else in_path.parent / f'{stem}.sanitized{in_path.suffix}'
-    subs_path = Path(args.substitutions) if args.substitutions else in_path.parent / f'{stem}.substitutions.txt'
+    out_path  = Path(args.output)        if args.output        else in_path.parent / f'{in_path.stem}.sanitized{in_path.suffix}'
+    subs_path = Path(args.substitutions) if args.substitutions else in_path.parent / f'{in_path.stem}.substitutions.txt'
 
-    extra_names:     list[str] = []
-    extra_companies: list[str] = []
-    if args.names:
-        extra_names = [l.strip() for l in Path(args.names).read_text(encoding='utf-8').splitlines() if l.strip()]
-    if args.companies:
-        extra_companies = [l.strip() for l in Path(args.companies).read_text(encoding='utf-8').splitlines() if l.strip()]
+    names:     list[str] = list(args.names)
+    companies: list[str] = list(args.companies)
 
-    use_ner = not args.no_ner
-    if use_ner and not _SPACY:
-        print(
-            '[info] spacy is not installed — NER-based name/company replacement is disabled.\n'
-            '[info] Only IPs and MACs will be replaced unless you pass --names / --companies.\n'
-            '[info] To enable NER:  pip install spacy && python -m spacy download en_core_web_sm',
-            file=sys.stderr,
-        )
+    if args.names_file:
+        names += [l.strip() for l in Path(args.names_file).read_text(encoding='utf-8').splitlines() if l.strip()]
+    if args.companies_file:
+        companies += [l.strip() for l in Path(args.companies_file).read_text(encoding='utf-8').splitlines() if l.strip()]
 
     # ── dispatch by format ────────────────────────────────────────────────────
 
@@ -612,10 +389,7 @@ def main() -> None:
             sys.exit('Error: python-docx is required for .docx files.\n'
                      'Install with:  pip install python-docx')
         source_text = _extract_text_docx(in_path)
-        _, substitutions = sanitize(
-            source_text, use_ner=use_ner, spacy_model=args.spacy_model,
-            extra_names=extra_names or None, extra_companies=extra_companies or None,
-        )
+        _, substitutions = sanitize(source_text, names=names or None, companies=companies or None)
         _write_sanitized_docx(in_path, out_path, substitutions)
 
     elif suffix == '.pdf':
@@ -623,22 +397,15 @@ def main() -> None:
             sys.exit('Error: pymupdf is required for .pdf files.\n'
                      'Install with:  pip install pymupdf')
         source_text = _extract_text_pdf(in_path)
-        _, substitutions = sanitize(
-            source_text, use_ner=use_ner, spacy_model=args.spacy_model,
-            extra_names=extra_names or None, extra_companies=extra_companies or None,
-        )
+        _, substitutions = sanitize(source_text, names=names or None, companies=companies or None)
         _write_sanitized_pdf(in_path, out_path, substitutions)
 
     else:
-        # Plain text (and any unrecognised extension — treat as UTF-8 text)
         if suffix not in _PLAIN_TEXT_SUFFIXES:
             print(f'[info] Unrecognised extension "{suffix}" — treating as plain text.',
                   file=sys.stderr)
         text = in_path.read_text(encoding='utf-8', errors='replace')
-        sanitized, substitutions = sanitize(
-            text, use_ner=use_ner, spacy_model=args.spacy_model,
-            extra_names=extra_names or None, extra_companies=extra_companies or None,
-        )
+        sanitized, substitutions = sanitize(text, names=names or None, companies=companies or None)
         out_path.write_text(sanitized, encoding='utf-8')
 
     print(f'Sanitized document → {out_path}')
