@@ -185,6 +185,11 @@ _TECH_VENDORS: set[str] = {
     'snyk', 'veracode', 'checkmarx', 'sonarqube',
     # Cybersecurity — deception / other
     'attivo', 'guardicore',
+    # MSSPs / consulting (security-specific)
+    'guidepoint', 'guidepoint security',
+    'optiv', 'ntt security', 'herjavec group', 'coalfire',
+    'bishopfox', 'bishop fox', 'nccgroup', 'ncc group',
+    'withsecure', 'f-secure',
     # Major tech — software & cloud
     'microsoft', 'google', 'apple', 'amazon', 'meta', 'facebook',
     'ibm', 'oracle', 'sap', 'salesforce', 'servicenow', 'adobe',
@@ -208,6 +213,10 @@ def _should_replace_org(entity_text: str) -> bool:
     # MITRE technique names use slash notation: Scheduled Task/Job, etc.
     if '/' in stripped:
         return False
+    # " - " and "+" are product/feature naming conventions, not company names
+    # e.g. "Enterprise+ - Compliance Management", "Custom LogRhythm Syntax - Admin User"
+    if ' - ' in stripped or '+' in stripped:
+        return False
     lower = stripped.lower()
     # Skip known technology vendors and product companies
     if lower in _TECH_VENDORS:
@@ -216,6 +225,43 @@ def _should_replace_org(entity_text: str) -> bool:
     if lower in _ORG_BLOCKLIST:
         return False
     return True
+
+
+# Words that cannot appear in a real person's name.  Used to reject spacy PERSON
+# entities that are actually section headers, product names, or generic phrases.
+_NON_NAME_WORDS: set[str] = {
+    # Document / report structure
+    'project', 'contacts', 'contact', 'closing', 'remarks', 'remark',
+    'document', 'history', 'summary', 'overview', 'introduction',
+    'conclusion', 'appendix', 'references', 'scope', 'purpose',
+    'section', 'chapter', 'agenda', 'minutes', 'notes',
+    # Product / feature language
+    'enterprise', 'advanced', 'custom', 'standard', 'professional',
+    'management', 'analytics', 'insights', 'compliance', 'operations',
+    'syntax', 'admin', 'user', 'users', 'module', 'platform',
+    'service', 'services', 'solution', 'solutions', 'system', 'systems',
+    'feature', 'component', 'dashboard', 'reporting', 'report',
+    'mitigate', 'detect', 'respond', 'recover', 'monitor',
+    # Other common false-positive triggers
+    'recommendations', 'findings', 'methodology', 'timeline',
+    'next', 'steps', 'action', 'items',
+}
+
+# Only letters, spaces, hyphens, apostrophes, and periods (for initials/titles).
+_VALID_NAME_RE = re.compile(r"^[A-Za-z][A-Za-z '\-\.]+$")
+
+def _should_replace_person(entity_text: str) -> bool:
+    """Return False for entities that cannot plausibly be a real person's name."""
+    stripped = entity_text.strip()
+    # Must contain only characters that appear in real names
+    if not _VALID_NAME_RE.match(stripped):
+        return False
+    # Reject if any word is clearly not part of a person's name
+    words = {w.lower() for w in stripped.split()}
+    if words & _NON_NAME_WORDS:
+        return False
+    return True
+
 
 # ── fallback word lists (used when faker is not installed) ────────────────────
 
@@ -322,6 +368,8 @@ def _ner_replace(text: str, sub_map: _SubMap, protected: set,
             continue
         s, e = ent.start_char, ent.end_char
         if _is_protected(s, e, protected):
+            continue
+        if ent.label_ == 'PERSON' and not _should_replace_person(ent.text):
             continue
         if ent.label_ == 'ORG' and not _should_replace_org(ent.text):
             continue
