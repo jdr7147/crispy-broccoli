@@ -155,30 +155,46 @@ so they are easy to filter in a SIEM or log file.
 
 | Simulation | Technique |
 |---|---|
-| EICAR drop | Writes the industry-standard AV test string to disk, waits 2s, deletes it |
-| Recon burst | Runs 2–4 enumeration commands in quick succession (OS-specific list) |
-| Port scan | Rapid SYN sweep of 20 random localhost ports |
-| Credential file access | Stat-checks well-known credential paths (SAM, shadow, SSH keys, browser stores) |
-| C2-like connection | TCP connect attempt to ports 4444, 1337, 31337, 8080, 6666 |
-| Script-in-temp | Writes a `.bat` or `.sh` to the temp directory and executes it from there |
+| EICAR drop | Writes the AV test string to a single temp location, waits 2s, deletes it |
+| EICAR multi-drop | Drops EICAR simultaneously in all writable temp/user locations |
+| Recon burst | Runs 2–4 enumeration commands directly — establishes baseline telemetry |
+| Credential file stat | `os.path.exists()` checks on credential paths — low-noise existence check |
+| Credential file read | Actually `open()`s credential files — generates file-read syscall EDRs log |
+| Port scan (localhost) | Rapid SYN sweep of 20 random localhost ports |
+| Subnet scan | SYN sweep of 10 neighbouring hosts on the local /24 — lateral movement recon (ports 22, 135, 139, 445, 3389, 5985) |
+| External C2 connect | TCP connects to RFC 5737 reserved IPs on C2 ports — generates real outbound telemetry safely |
+| DNS C2 domains | Resolves known sinkholed C2 domains (WannaCry kill switch, SolarWinds Sunburst) |
+| DGA DNS burst | Queries 5–10 algorithmically generated random-looking domains — NXDOMAIN burst triggers DGA detection |
+| Script-in-temp | Writes a `.bat` or `.sh` to the temp directory and executes it |
 
 #### Windows only
 
 | Simulation | Technique |
 |---|---|
+| CMD recon chain | 8 recon commands chained via `cmd.exe /c` — creates suspicious `python→cmd→tools` process tree |
 | PowerShell encoded command | `powershell -EncodedCommand <base64>` — common obfuscation technique |
 | PowerShell download cradle | `(New-Object Net.WebClient).DownloadString(url)` — stage-2 retrieval simulation |
-| certutil LOLBAS | Uses `certutil -urlcache -split -f` to download a file — Living off the Land |
+| certutil LOLBAS | `certutil -urlcache -split -f` download — Living off the Land |
+| mshta LOLBAS | `mshta.exe` executing inline VBScript — macro-less execution technique |
+| wscript LOLBAS | VBScript written to temp and executed via `wscript.exe` |
+| rundll32 LOLBAS | `rundll32.exe` JavaScript execution — Squiblydoo-style |
 | Registry enumeration | Queries credential-adjacent keys (Winlogon, PuTTY sessions, OpenSSH, RDP history) |
+| Registry persistence | Writes a Run key to `HKCU\...\Run`, waits 2s, deletes it |
+| Scheduled task | `schtasks /create` then `/delete` — persistence attempt with cleanup |
+| VSS / backup recon | `vssadmin list shadows`, `wbadmin get status`, `bcdedit /enum` — ransomware pre-stage pattern |
+| LSASS handle request | `OpenProcess(PROCESS_ALL_ACCESS)` on the LSASS PID — credential dumping precursor |
 
 #### RHEL / CentOS
 
 | Simulation | Technique |
 |---|---|
+| Bash recon chain | 9-command recon chain via `bash -c` — creates suspicious `python→bash→tools` process tree |
 | Bash encoded command | `bash -c "$(echo <base64> \| base64 -d)"` — Linux obfuscation equivalent |
 | curl/wget download cradle | Downloads from a safe echo endpoint to simulate payload retrieval |
+| /etc/shadow read | Actually `open()`s `/etc/shadow` — generates credential-access telemetry |
 | SUID binary search | `find /usr -perm -4000` — standard privilege escalation recon |
 | Cron persistence | Writes a test crontab entry then removes it immediately |
+| ptrace attempt | `ptrace(PTRACE_ATTACH, 1)` on init/systemd — process injection precursor |
 | Directory traversal | Lists `/etc`, `/var/log`, `/root`, `~/.ssh`, `/tmp` |
 | rpm -Va integrity check | Verifies package file integrity — used to find tampered binaries |
 | yum/dnf package recon | Lists all installed packages via yum or dnf |
@@ -196,13 +212,43 @@ Same as RHEL, plus:
 
 | Simulation | Technique |
 |---|---|
+| Bash recon chain | Multi-command recon via `bash -c` intermediary |
 | Bash encoded command | Same base64 decode+exec technique as Linux |
 | curl download cradle | Simulates payload retrieval |
+| /etc/shadow read | Actually opens `/etc/shadow` — generates credential-access telemetry |
 | SUID binary search | Scans `/usr` for setuid binaries |
 | Directory traversal | Lists sensitive directories |
 | Keychain access | `security list-keychains` and `find-generic-password` |
 | LaunchAgent persistence | Writes and loads a test `.plist`, then immediately unloads and deletes it |
 | macOS-specific recon | `dscl`, `networksetup`, `system_profiler`, `defaults read` |
+
+---
+
+## C2 Beacon
+
+The `--beacon` flag starts a background thread that periodically attempts a TCP
+connection to a target host — simulating a compromised endpoint checking in with
+a C2 server on a regular interval.
+
+```bash
+# Beacon to the default RFC 5737 test IP every 60s
+python3 traffic_generator.py --beacon
+
+# Beacon to your own test server every 30s on port 8443
+python3 traffic_generator.py --beacon --beacon-host 10.0.0.99 --beacon-port 8443 --beacon-interval 30
+```
+
+| Option | Default | Description |
+|---|---|---|
+| `--beacon` | off | Enable the beacon thread |
+| `--beacon-host IP` | `192.0.2.100` | Target host (RFC 5737 reserved IP by default — never routed) |
+| `--beacon-port PORT` | `4444` | Target port |
+| `--beacon-interval SEC` | `60` | Seconds between check-ins |
+
+The default target (`192.0.2.100`) is an RFC 5737 documentation address — it
+will never route to a real host, but the connection *attempt* generates outbound
+network telemetry that EDRs log. Point `--beacon-host` at your own test server
+if you want to observe a successful connection.
 
 ---
 
@@ -243,9 +289,9 @@ python3 traffic_generator.py --normal-interval 30 --attack-interval 300 --attack
 python3 traffic_generator.py --normal-interval 20 --attack-interval 120 --attack-prob 0.7
 ```
 
-**Attack-heavy** (stress-test detection rules, guaranteed fire every window):
+**Attack-heavy with beacon** (stress-test detection rules, guaranteed fire, C2 simulation):
 ```bash
-python3 traffic_generator.py --normal-interval 15 --attack-interval 60 --attack-prob 1.0
+python3 traffic_generator.py --normal-interval 15 --attack-interval 60 --attack-prob 1.0 --beacon
 ```
 
 **Normal traffic only** (baseline telemetry, no detections expected):
@@ -276,3 +322,18 @@ on minimal container images; the script logs it as blocked and moves on.
 **Script runs but no network events appear in SentinelOne**  
 Network visibility may require the Full Visibility or Network Control add-on.
 Check your license and agent configuration in the management console.
+
+**Subnet scan or external C2 connections don't show up**  
+The subnet scan targets hosts on your local /24 — if no hosts are in the
+`x.x.x.1–49` range they'll all time out. External C2 connections use RFC 5737
+addresses which are never routed, so the attempt is the signal, not a successful
+connection. Both appear in the process's network telemetry regardless.
+
+**LSASS access attempt shows access denied**  
+That is the expected result on a hardened or agent-protected system. The
+`OpenProcess` call itself is the detection trigger — the denial confirms the
+agent is protecting LSASS correctly.
+
+**ptrace attempt shows EPERM**  
+Expected on any system with Yama LSM (`/proc/sys/kernel/yama/ptrace_scope` ≥ 1).
+The attempt still generates an audit event.
