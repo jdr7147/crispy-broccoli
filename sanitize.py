@@ -239,15 +239,57 @@ def _apply_substitutions(text: str, pairs: list[tuple[str, str]]) -> str:
 # ── docx support ──────────────────────────────────────────────────────────────
 
 def _iter_docx_paragraphs(doc):
-    """Yield every paragraph in a docx document: body, tables, headers, footers."""
+    """Yield every paragraph in body, tables, and all header/footer variants."""
     yield from doc.paragraphs
     for table in doc.tables:
         for row in table.rows:
             for cell in row.cells:
                 yield from cell.paragraphs
     for section in doc.sections:
-        yield from section.header.paragraphs
-        yield from section.footer.paragraphs
+        for hdr_ftr in (
+            section.header,
+            section.footer,
+            section.first_page_header,
+            section.first_page_footer,
+            section.even_page_header,
+            section.even_page_footer,
+        ):
+            try:
+                yield from hdr_ftr.paragraphs
+            except Exception:
+                pass  # linked or unavailable header/footer — skip safely
+
+def _sanitize_paragraph(para, pairs: list[tuple[str, str]]) -> None:
+    """Apply substitutions to a paragraph, merging runs when necessary.
+
+    Per-run substitution fails when an entity (name, IP) spans multiple runs
+    because Word can split a word mid-character for formatting reasons.  This
+    function detects that case: it first tries the cheap per-run path, and
+    falls back to merging all runs into the first one only when needed.
+    """
+    if not para.runs:
+        return
+
+    # Fast path: try each run individually — works when no entity crosses a boundary
+    changed = False
+    for run in para.runs:
+        if run.text:
+            new_text = _apply_substitutions(run.text, pairs)
+            if new_text != run.text:
+                run.text = new_text
+                changed = True
+
+    if changed:
+        return  # substitution(s) applied cleanly within individual runs
+
+    # Slow path: check whether the full paragraph text contains any target.
+    # If it does, merge all runs into the first so cross-run entities are caught.
+    full_text = ''.join(r.text for r in para.runs)
+    sanitized = _apply_substitutions(full_text, pairs)
+    if sanitized != full_text:
+        para.runs[0].text = sanitized
+        for run in para.runs[1:]:
+            run.text = ''
 
 def _extract_text_docx(path: Path) -> str:
     import docx
@@ -259,9 +301,7 @@ def _write_sanitized_docx(in_path: Path, out_path: Path,
     import docx
     doc = docx.Document(str(in_path))
     for para in _iter_docx_paragraphs(doc):
-        for run in para.runs:
-            if run.text:
-                run.text = _apply_substitutions(run.text, pairs)
+        _sanitize_paragraph(para, pairs)
     doc.save(str(out_path))
 
 # ── pdf support ───────────────────────────────────────────────────────────────
