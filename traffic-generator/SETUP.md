@@ -1,7 +1,8 @@
-# SentinelOne Traffic Generator — Setup & Usage Guide
+# Endpoint Traffic Generator — Setup & Usage Guide
 
-Simulates realistic endpoint activity for validating SentinelOne agent
-detection coverage. Runs two categories of activity on a configurable schedule:
+Simulates realistic endpoint activity for validating EDR detection coverage
+(SentinelOne, CrowdStrike, or any agent-based EDR). Runs two categories of
+activity on a configurable schedule:
 
 - **Normal traffic** — web browsing, DNS lookups, file I/O, SMTP probes
 - **Attack simulations** — clearly labeled `[TEST-ATTACK]` behaviors that
@@ -109,6 +110,10 @@ python3 traffic_generator.py --runtime 3600 --log-file sim.log
 | `--attack-interval SEC` | `300` | Seconds between attack simulation windows |
 | `--attack-prob 0-1` | `0.4` | Probability an attack fires each window (0 = never, 1 = always) |
 | `--runtime SEC` | *(run forever)* | Stop automatically after this many seconds |
+| `--beacon` | off | Enable background C2 beacon simulation |
+| `--beacon-host IP` | `192.0.2.100` | Beacon target host (RFC 5737 reserved IP by default) |
+| `--beacon-port PORT` | `4444` | Beacon target port |
+| `--beacon-interval SEC` | `60` | Seconds between beacon check-ins |
 | `--log-file PATH` | *(stdout only)* | Also write logs to this file |
 | `--verbose` | — | Show DEBUG-level output |
 
@@ -121,7 +126,7 @@ then prints the detected profile at startup:
 
 ```
 OS profile      : rhel  (Linux-5.14.0-x86_64-with-glibc2.28)
-Attack pool     : 13 actions
+Attack pool     : 27 actions
 ```
 
 | Detected value | Covers |
@@ -314,6 +319,81 @@ python3 traffic_generator.py --attack-prob 0
 
 ---
 
+## Detection Confidence by OS
+
+Not all attacks are equally likely to trigger an alert. This table reflects
+expected behaviour on default EDR policies — tuned environments will catch more.
+
+### Windows
+
+| Attack | Confidence | Notes |
+|---|---|---|
+| EICAR drop / multi-drop | High | Triggers if real-time protection is on |
+| PowerShell IEX | High | Most-signatured PS technique |
+| PowerShell encoded command | High | First-class detection rule on both S1 and CRWD |
+| LSASS handle request | High | Even a denied attempt registers as credential access |
+| VSS / backup recon | High | Exact ransomware pre-stage pattern |
+| CMD recon chain | High | Suspicious process tree triggers behavioral AI |
+| Registry / scheduled task persistence | High | Write-then-delete still fires the creation event |
+| LOLBAS (mshta, wscript, rundll32, certutil) | Medium–High | Depends on LOLBin policy |
+| External C2 connections | Medium | Requires network visibility add-on |
+| DGA DNS burst | Medium | Requires DNS monitoring to be enabled |
+
+### RHEL / CentOS
+
+| Attack | Confidence | Notes |
+|---|---|---|
+| EICAR drop / multi-drop | High | |
+| `curl \| bash` | High | First-class detection rule on both S1 and CRWD |
+| Reverse shell simulation | High | `bash /dev/tcp` pattern is heavily signatured |
+| `/etc/shadow` read | High | Credential access event even on `PermissionError` |
+| DGA DNS burst | High | Rapid NXDOMAIN pattern |
+| DNS C2 domains | High | Known-bad domain reputation |
+| Bash encoded command | Medium–High | |
+| systemd persistence | Medium–High | |
+| Bash recon chain | Medium | Suspicious process tree |
+| External C2 connections | Medium | Requires network visibility |
+| ptrace attempt | Medium | Requires audit/eBPF visibility |
+| nmap subnet scan | Medium | **Only fires if nmap is installed** — not present by default on CentOS; install with `sudo dnf install nmap` |
+| `/proc/1` access | Medium | Requires file-access monitoring |
+| sudo recon | Low–Medium | Low signal alone; stronger in combination |
+
+### Kali / Debian / Ubuntu
+
+Same as RHEL/CentOS, plus:
+
+| Attack | Confidence | Notes |
+|---|---|---|
+| Offensive tool probe | Medium | Kali will have most tools present — their detection as installed is itself a signal |
+| nmap subnet scan | Medium–High | nmap is installed by default on Kali |
+
+### macOS
+
+| Attack | Confidence | Notes |
+|---|---|---|
+| EICAR drop / multi-drop | High | |
+| `curl \| bash` | High | |
+| Reverse shell simulation | High | |
+| TCC database access | High | macOS-specific, strongly monitored |
+| LaunchAgent persistence | High | |
+| osascript execution | Medium–High | |
+| Gatekeeper / SIP recon | Medium | |
+| Keychain access | Medium | |
+
+---
+
+## Optional Dependencies
+
+Most attacks use only Python standard library. Two attacks use external tools
+if available and silently skip otherwise:
+
+| Tool | Used by | Install |
+|---|---|---|
+| `nmap` | `attack_nmap_scan` | `sudo dnf install nmap` (RHEL/CentOS) · `sudo apt install nmap` (Debian/Kali) · included on Kali |
+| `curl` | `attack_curl_pipe_bash`, `attack_curl_download_cradle` | Included on most distributions; `wget` used as fallback |
+
+---
+
 ## Troubleshooting
 
 **"command not found: python3"**  
@@ -350,3 +430,12 @@ agent is protecting LSASS correctly.
 **ptrace attempt shows EPERM**  
 Expected on any system with Yama LSM (`/proc/sys/kernel/yama/ptrace_scope` ≥ 1).
 The attempt still generates an audit event.
+
+**nmap scan skipped on CentOS / RHEL**  
+`nmap` is not installed by default. Install it with `sudo dnf install nmap` to
+enable the subnet scan attack. On Kali it is pre-installed and fires automatically.
+
+**curl|bash or reverse shell sim hangs briefly then continues**  
+Both attacks target RFC 5737 addresses (192.0.2.x) which are never routed — the
+connection will time out after a few seconds. This is expected; the attempt is
+what generates the telemetry, not a successful connection.
