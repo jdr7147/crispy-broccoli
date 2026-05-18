@@ -1366,6 +1366,69 @@ _ATTACKS_BY_OS = {
 
 ATTACK_ACTIONS = _ATTACKS_COMMON + _ATTACKS_BY_OS.get(OS, [])
 
+# Weighted selection — higher weight = more likely to be chosen each attack window.
+# Passive attacks (weight 1) rarely fire; high-signal attacks (weight 5) fire often.
+_ATTACK_WEIGHTS_MAP = {
+    # Weight 5 — almost always catches EDR
+    "attack_eicar_drop":               5,
+    "attack_eicar_multi_drop":         5,
+    "attack_hidden_payload_exec":      5,
+    "attack_credential_exfil_sim":     5,
+    "attack_ssh_persistence":          5,
+    "attack_log_tamper":               5,
+    "attack_reverse_shell_sim":        5,
+    "attack_curl_pipe_bash":           5,
+    "attack_lsass_access":             5,
+    "attack_powershell_iex":           5,
+    "attack_powershell_encoded":       5,
+    "attack_registry_persistence":     5,
+    "attack_scheduled_task":           5,
+    # Weight 4 — high signal
+    "attack_systemd_persistence":      4,
+    "attack_cron_persistence_attempt": 4,
+    "attack_bash_chain":               4,
+    "attack_bash_encoded":             4,
+    "attack_shadow_read":              4,
+    "attack_ptrace_attempt":           4,
+    "attack_proc_access":              4,
+    "attack_launchd_persistence":      4,
+    "attack_tcc_access":               4,
+    "attack_osascript":                4,
+    "attack_lolbas_mshta":             4,
+    "attack_lolbas_wscript":           4,
+    "attack_lolbas_rundll32":          4,
+    "attack_cmd_chain":                4,
+    "attack_vss_recon":                4,
+    # Weight 3 — medium signal
+    "attack_script_in_temp":           3,
+    "attack_external_c2_connect":      3,
+    "attack_dns_c2_domains":           3,
+    "attack_dga_dns":                  3,
+    "attack_subnet_scan":              3,
+    "attack_nmap_scan":                3,
+    "attack_lolbas_certutil":          3,
+    "attack_keychain_access":          3,
+    "attack_gatekeeper_recon":         3,
+    # Weight 2 — lower signal but still useful
+    "attack_recon_commands":           2,
+    "attack_credential_read":          2,
+    "attack_curl_download_cradle":     2,
+    "attack_suid_search":              2,
+    "attack_sudo_recon":               2,
+    "attack_powershell_download_cradle": 2,
+    # Weight 1 — passive, rarely worth a slot
+    "attack_credential_file_access":   1,
+    "attack_port_scan_localhost":      1,
+    "attack_sensitive_dir_traversal":  1,
+    "attack_windows_registry_enum":    1,
+    "attack_rpm_verify":               1,
+    "attack_yum_recon":                1,
+    "attack_dpkg_recon":               1,
+    "attack_macos_recon":              1,
+    "attack_kali_tool_probe":          1,
+}
+ATTACK_WEIGHTS = [_ATTACK_WEIGHTS_MAP.get(fn.__name__, 2) for fn in ATTACK_ACTIONS]
+
 # ---------------------------------------------------------------------------
 # C2 Beacon thread
 # ---------------------------------------------------------------------------
@@ -1486,7 +1549,7 @@ def run_loop(
 
             if now >= next_attack:
                 if random.random() < attack_probability:
-                    action = random.choice(ATTACK_ACTIONS)
+                    action = random.choices(ATTACK_ACTIONS, weights=ATTACK_WEIGHTS, k=1)[0]
                     log.warning("-" * 60)
                     log.warning("  ATTACK SIMULATION — %s", action.__name__)
                     log.warning("-" * 60)
