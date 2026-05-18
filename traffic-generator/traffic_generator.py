@@ -11,6 +11,8 @@ runs only the attacks and recon commands relevant to that platform.
 Run with --help for all options.
 """
 
+from __future__ import annotations
+
 import argparse
 import base64
 import datetime
