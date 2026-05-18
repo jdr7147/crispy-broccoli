@@ -28,6 +28,7 @@ import tempfile
 import threading
 import time
 import urllib.request
+from dataclasses import dataclass, field
 
 # ---------------------------------------------------------------------------
 # Logging
@@ -36,6 +37,51 @@ import urllib.request
 LOG_FMT = "%(asctime)s  %(levelname)-8s  %(message)s"
 logging.basicConfig(format=LOG_FMT, datefmt="%Y-%m-%d %H:%M:%S", level=logging.INFO)
 log = logging.getLogger("traffic-gen")
+
+# ---------------------------------------------------------------------------
+# Attack recording
+# ---------------------------------------------------------------------------
+
+@dataclass
+class AttackRecord:
+    name: str
+    timestamp: str
+    impeded: bool = False
+    impede_reasons: list[str] = field(default_factory=list)
+
+
+ATTACK_LOG: list[AttackRecord] = []
+_impeded_signals: list[str] = []
+
+
+def _note_impeded(reason: str) -> None:
+    _impeded_signals.append(reason)
+
+
+# Attacks that generate little or no EDR-visible signal on their own.
+_PASSIVE_ATTACKS = {
+    "attack_credential_file_access",
+    "attack_port_scan_localhost",
+    "attack_sensitive_dir_traversal",
+    "attack_windows_registry_enum",
+    "attack_rpm_verify",
+    "attack_yum_recon",
+    "attack_dpkg_recon",
+    "attack_gatekeeper_recon",
+    "attack_macos_recon",
+}
+
+_PASSIVE_NOTES = {
+    "attack_credential_file_access": "os.path.exists() only — no file-read syscall",
+    "attack_port_scan_localhost":    "loopback only — no lateral movement signal",
+    "attack_sensitive_dir_traversal": "plain ls — no file-open or escalation attempt",
+    "attack_windows_registry_enum":  "read-only reg query — no write telemetry",
+    "attack_rpm_verify":             "package integrity check — passive enumeration",
+    "attack_yum_recon":              "dnf/yum list — passive package enumeration",
+    "attack_dpkg_recon":             "dpkg -l — passive package enumeration",
+    "attack_gatekeeper_recon":       "spctl/csrutil queries — read-only status checks",
+    "attack_macos_recon":            "info-gathering commands — no access violation",
+}
 
 # ---------------------------------------------------------------------------
 # OS detection
@@ -229,6 +275,8 @@ def run_cmd(args: list[str], timeout: int = 10) -> tuple[int, str]:
     try:
         result = subprocess.run(args, capture_output=True, text=True, timeout=timeout)
         snippet = (result.stdout or "").strip()[:200]
+        if result.returncode == -9:
+            _note_impeded(f"subprocess killed (SIGKILL) — possible EDR termination: {args[0]}")
         return result.returncode, snippet
     except FileNotFoundError:
         return -1, f"command not found: {args[0]}"
@@ -356,8 +404,12 @@ def attack_eicar_drop():
             f.write(EICAR_STRING)
         log.warning("%s  written — expecting AV/EDR alert", _tag("TEST-ATTACK"))
         time.sleep(2)
-        os.remove(fname)
-        log.warning("%s  removed", _tag("TEST-ATTACK"))
+        if not os.path.exists(fname):
+            log.warning("%s  FILE GONE — deleted by AV/EDR before cleanup", _tag("TEST-ATTACK"))
+            _note_impeded("EICAR file deleted by AV/EDR before script cleanup")
+        else:
+            os.remove(fname)
+            log.warning("%s  removed", _tag("TEST-ATTACK"))
     except Exception as exc:
         log.debug("%s  EICAR error: %s", _tag("TEST-ATTACK"), exc)
 
@@ -377,12 +429,23 @@ def attack_eicar_multi_drop():
         except Exception as exc:
             log.debug("%s  failed %s: %s", _tag("TEST-ATTACK"), fname, exc)
     time.sleep(3)
+    removed = 0
+    edr_deleted = 0
     for fname in written:
-        try:
-            os.remove(fname)
-        except OSError:
-            pass
-    log.warning("%s  %d EICAR files removed", _tag("TEST-ATTACK"), len(written))
+        if not os.path.exists(fname):
+            edr_deleted += 1
+        else:
+            try:
+                os.remove(fname)
+                removed += 1
+            except OSError:
+                pass
+    if edr_deleted:
+        log.warning("%s  %d of %d EICAR files gone before cleanup — deleted by AV/EDR",
+                    _tag("TEST-ATTACK"), edr_deleted, len(written))
+        _note_impeded(f"{edr_deleted}/{len(written)} EICAR files deleted by AV/EDR")
+    log.warning("%s  %d EICAR files removed by script, %d by AV/EDR",
+                _tag("TEST-ATTACK"), removed, edr_deleted)
 
 
 def attack_recon_commands():
@@ -995,6 +1058,48 @@ def start_beacon(host: str, port: int, interval: float) -> None:
     t.start()
 
 # ---------------------------------------------------------------------------
+# End-of-run summary
+# ---------------------------------------------------------------------------
+
+def print_summary(start_time: float) -> None:
+    elapsed = time.monotonic() - start_time
+    h, rem = divmod(int(elapsed), 3600)
+    m, s = divmod(rem, 60)
+    elapsed_str = f"{h:02d}:{m:02d}:{s:02d}"
+
+    W = 80
+    log.info("=" * W)
+    log.info("  END-OF-RUN ATTACK SUMMARY")
+    log.info("=" * W)
+    log.info("  Run time : %s  |  Attacks fired : %d", elapsed_str, len(ATTACK_LOG))
+
+    if not ATTACK_LOG:
+        log.info("  No attacks were fired during this run.")
+    else:
+        log.info("-" * W)
+        log.info("  %-8s  %-42s  %-9s  %s", "TIME", "ATTACK", "IMPEDED?", "NOTES")
+        log.info("  " + "-" * (W - 2))
+        for rec in ATTACK_LOG:
+            impeded_str = "YES <<<" if rec.impeded else "no"
+            notes = "; ".join(rec.impede_reasons)[:35] if rec.impede_reasons else ""
+            log.info("  %-8s  %-42s  %-9s  %s", rec.timestamp, rec.name, impeded_str, notes)
+
+    # Passive attack section
+    fired_passive = [r for r in ATTACK_LOG if r.name in _PASSIVE_ATTACKS]
+    if fired_passive:
+        log.info("")
+        log.info("  PASSIVE ATTACKS — low EDR signal, consider removing from rotation:")
+        log.info("  " + "-" * (W - 2))
+        seen: set[str] = set()
+        for rec in fired_passive:
+            if rec.name not in seen:
+                seen.add(rec.name)
+                note = _PASSIVE_NOTES.get(rec.name, "low-signal activity")
+                log.info("  %-42s  %s", rec.name, note)
+
+    log.info("=" * W)
+
+# ---------------------------------------------------------------------------
 # Scheduler
 # ---------------------------------------------------------------------------
 
@@ -1053,10 +1158,18 @@ def run_loop(
                     log.warning("-" * 60)
                     log.warning("  ATTACK SIMULATION — %s", action.__name__)
                     log.warning("-" * 60)
+                    _impeded_signals.clear()
+                    ts = datetime.datetime.now().strftime("%H:%M:%S")
                     try:
                         action()
                     except Exception as exc:
                         log.debug("Attack action error: %s", exc)
+                    ATTACK_LOG.append(AttackRecord(
+                        name=action.__name__,
+                        timestamp=ts,
+                        impeded=bool(_impeded_signals),
+                        impede_reasons=list(_impeded_signals),
+                    ))
                 else:
                     log.info("%s Attack window — no attack this cycle", _tag("NORMAL"))
                 next_attack = now + jitter(attack_interval)
@@ -1070,6 +1183,7 @@ def run_loop(
     log.info("=" * 70)
     log.info("  Traffic Generator STOPPED after %d cycles", cycle)
     log.info("=" * 70)
+    print_summary(start)
 
 # ---------------------------------------------------------------------------
 # Entry point
