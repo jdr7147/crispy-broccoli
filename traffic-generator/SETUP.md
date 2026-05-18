@@ -19,7 +19,7 @@ relevant to that platform — no PowerShell on Linux, no bash cradles on Windows
 
 | Requirement | Notes |
 |---|---|
-| Python 3.10 – 3.12 | 3.13 is **not** recommended (library compatibility) |
+| Python 3.7 or later | 3.13 is **not** recommended (library compatibility) |
 | `traffic_generator.py` | The simulator script |
 | Network access | Used for web browse and DNS simulation |
 | No extra packages | All dependencies are Python standard library |
