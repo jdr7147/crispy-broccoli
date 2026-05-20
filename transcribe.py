@@ -1,13 +1,16 @@
 #!/usr/bin/env python3
 """
 Meeting transcription tool.
-Records microphone + system audio, transcribes with local Whisper,
-and optionally separates speakers (Person A, Person B, …) via pyannote.
+Records microphone + system audio, transcribes with local Whisper in
+real time (chunk by chunk), and optionally separates speakers
+(Person A, Person B, …) via pyannote at the end.
 """
 
 import argparse
+import contextlib
 import queue
 import sys
+import tempfile
 import threading
 import wave
 from datetime import datetime
@@ -54,28 +57,6 @@ def find_default_mic(devices):
 # Recording
 # ---------------------------------------------------------------------------
 
-def record_stream(device_index, samplerate, channels, out_queue, stop_event):
-    buf = []
-
-    def callback(indata, frames, time, status):
-        if status:
-            print(f"  [stream warning] {status}", file=sys.stderr)
-        buf.append(indata.copy())
-
-    with sd.InputStream(
-        device=device_index,
-        channels=channels,
-        samplerate=samplerate,
-        dtype="float32",
-        callback=callback,
-    ):
-        stop_event.wait()
-
-    out_queue.put(
-        np.concatenate(buf, axis=0) if buf else np.zeros((0, channels), dtype="float32")
-    )
-
-
 def _normalize(audio: np.ndarray) -> np.ndarray:
     peak = np.abs(audio).max()
     return audio / peak if peak > 1e-6 else audio
@@ -99,6 +80,54 @@ def save_wav(path: Path, audio: np.ndarray, samplerate: int):
         wf.writeframes(pcm.tobytes())
 
 
+def record_chunked(mic_idx, mon_idx, samplerate, chunk_duration, chunk_queue, stop_event):
+    """Record from mic (and optionally monitor) and emit mixed mono chunks."""
+    mic_buf = []
+    mon_buf = []
+    lock = threading.Lock()
+
+    def mic_cb(indata, frames, time, status):
+        if status:
+            print(f"  [mic] {status}", file=sys.stderr)
+        with lock:
+            mic_buf.append(indata.copy())
+
+    def mon_cb(indata, frames, time, status):
+        if status:
+            print(f"  [mon] {status}", file=sys.stderr)
+        with lock:
+            mon_buf.append(indata.copy())
+
+    def extract():
+        with lock:
+            mic = np.concatenate(mic_buf, axis=0) if mic_buf else np.zeros((0, 1), dtype="float32")
+            mic_buf.clear()
+            mon = np.concatenate(mon_buf, axis=0) if mon_buf else None
+            mon_buf.clear()
+        if mon is not None and len(mon) > 0:
+            return mix_to_mono(mic, mon)
+        return mic.mean(axis=1) if mic.ndim > 1 else mic.flatten()
+
+    streams = [
+        sd.InputStream(device=mic_idx, channels=1, samplerate=samplerate,
+                       dtype="float32", callback=mic_cb)
+    ]
+    if mon_idx is not None:
+        streams.append(
+            sd.InputStream(device=mon_idx, channels=2, samplerate=samplerate,
+                           dtype="float32", callback=mon_cb)
+        )
+
+    with contextlib.ExitStack() as stack:
+        for s in streams:
+            stack.enter_context(s)
+        while not stop_event.wait(timeout=chunk_duration):
+            chunk_queue.put(extract())
+        chunk_queue.put(extract())  # final partial chunk after stop
+
+    chunk_queue.put(None)  # sentinel
+
+
 # ---------------------------------------------------------------------------
 # Transcription (Whisper)
 # ---------------------------------------------------------------------------
@@ -116,23 +145,70 @@ def load_prompt_config(script_path: Path) -> str:
     return ", ".join(words)
 
 
-def transcribe_segments(wav_path: Path, model_size: str, language: str | None, initial_prompt: str | None):
-    """Return (full_text, segments) where segments have start/end/text keys."""
+def load_whisper_model(model_size: str):
     try:
         import whisper
     except ImportError:
         sys.exit("openai-whisper is not installed. Run: pip install openai-whisper")
-
     print(f"Loading Whisper model '{model_size}' …")
-    model = whisper.load_model(model_size)
-    print("Transcribing …")
-    opts = {"word_timestamps": False}
-    if language:
-        opts["language"] = language
-    if initial_prompt:
-        opts["initial_prompt"] = initial_prompt
-    result = model.transcribe(str(wav_path), **opts)
-    return result["text"].strip(), result.get("segments", [])
+    return whisper.load_model(model_size)
+
+
+def transcribe_chunk(model, audio: np.ndarray, samplerate: int, language: str | None,
+                     initial_prompt: str | None, time_offset: float):
+    """Transcribe a single audio chunk. Returns (text, segments) with absolute timestamps."""
+    with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tf:
+        tmp_path = Path(tf.name)
+    try:
+        save_wav(tmp_path, audio, samplerate)
+        opts = {"word_timestamps": False}
+        if language:
+            opts["language"] = language
+        if initial_prompt:
+            opts["initial_prompt"] = initial_prompt
+        result = model.transcribe(str(tmp_path), **opts)
+    finally:
+        tmp_path.unlink(missing_ok=True)
+
+    text = result["text"].strip()
+    segments = [
+        {"start": s["start"] + time_offset, "end": s["end"] + time_offset, "text": s["text"]}
+        for s in result.get("segments", [])
+    ]
+    return text, segments
+
+
+def transcription_worker(chunk_queue, model, language, initial_prompt, samplerate,
+                         transcript_path, all_audio, all_segments):
+    """Consume audio chunks, transcribe each, and append to transcript file in real time."""
+    time_offset = 0.0
+    chunk_num = 0
+
+    while True:
+        chunk = chunk_queue.get()
+        if chunk is None:
+            break
+
+        all_audio.append(chunk)
+        duration = len(chunk) / samplerate
+
+        if duration < 1.0:
+            time_offset += duration
+            continue
+
+        chunk_num += 1
+        print(f"  [transcribing chunk {chunk_num}]", end=" ", flush=True)
+        text, segs = transcribe_chunk(model, chunk, samplerate, language, initial_prompt, time_offset)
+
+        if text:
+            with open(transcript_path, "a", encoding="utf-8") as f:
+                f.write(text + "\n")
+            print(text)
+        else:
+            print("(silence)")
+
+        all_segments.extend(segs)
+        time_offset += duration
 
 
 # ---------------------------------------------------------------------------
@@ -233,20 +309,25 @@ def format_diarized(labeled: list[tuple[str, str]]) -> str:
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Record a meeting and transcribe it."
+        description="Record a meeting and transcribe it in real time."
     )
     parser.add_argument(
         "--model",
-        default="base",
+        default="tiny",
         choices=["tiny", "base", "small", "medium", "large"],
-        help="Whisper model size (default: base)",
+        help="Whisper model size (default: tiny)",
     )
-    parser.add_argument("--language", default=None, help="Language code, e.g. 'en'.")
+    parser.add_argument("--language", default="en", help="Language code (default: en).")
     parser.add_argument(
         "--initial-prompt",
         default=None,
-        help="Words/names to hint Whisper toward (e.g. 'Jarrett, Ash, Nic'). "
-             "Merged with transcribe_config.txt if present.",
+        help="Words/names to hint Whisper toward. Merged with transcribe_config.txt if present.",
+    )
+    parser.add_argument(
+        "--chunk-duration",
+        type=int,
+        default=30,
+        help="Seconds of audio per transcription chunk (default: 30).",
     )
     parser.add_argument("--samplerate", type=int, default=16000)
     parser.add_argument("--output-dir", type=Path, default=Path("."))
@@ -284,7 +365,7 @@ def main():
             "https://huggingface.co/pyannote/speaker-diarization-3.1)"
         )
 
-    # Resolve initial prompt: config file first, CLI arg overrides/extends
+    # Resolve initial prompt: config file first, CLI arg merges in
     config_prompt = load_prompt_config(Path(__file__))
     if args.initial_prompt and config_prompt:
         initial_prompt = f"{config_prompt}, {args.initial_prompt}"
@@ -315,75 +396,82 @@ def main():
     else:
         print("  System audio  : not found — recording microphone only")
     print(f"  Whisper model : {args.model}")
+    print(f"  Language      : {args.language}")
+    print(f"  Chunk duration: {args.chunk_duration}s")
     print(f"  Prompt hints  : {initial_prompt or '(none)'}")
     print(f"  Diarization   : {'yes' if args.diarize else 'no'}")
     print()
-    print("Press ENTER to start recording, then press ENTER again to stop.")
-    input("  > ready? press ENTER to begin … ")
-
-    stop_event = threading.Event()
-    mic_q: queue.Queue = queue.Queue()
-    mon_q: queue.Queue = queue.Queue()
-
-    threads = [
-        threading.Thread(
-            target=record_stream,
-            args=(mic_idx, args.samplerate, 1, mic_q, stop_event),
-            daemon=True,
-        )
-    ]
-    if mon_idx is not None:
-        threads.append(
-            threading.Thread(
-                target=record_stream,
-                args=(mon_idx, args.samplerate, 2, mon_q, stop_event),
-                daemon=True,
-            )
-        )
-
-    for t in threads:
-        t.start()
-
-    print("Recording … (press ENTER to stop)")
-    input()
-    stop_event.set()
-
-    print("Stopping …")
-    for t in threads:
-        t.join()
-
-    mic_audio = mic_q.get()
-    if mon_idx is not None and not mon_q.empty():
-        mon_audio = mon_q.get()
-        audio = mix_to_mono(mic_audio, mon_audio)
-    else:
-        audio = mic_audio.mean(axis=1) if mic_audio.ndim > 1 else mic_audio.flatten()
-
-    duration = len(audio) / args.samplerate
-    print(f"Recorded {duration:.1f} seconds of audio.")
 
     args.output_dir.mkdir(parents=True, exist_ok=True)
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     wav_path = args.output_dir / f"meeting_{timestamp}.wav"
     transcript_path = args.output_dir / f"meeting_{timestamp}.txt"
 
-    save_wav(wav_path, audio, args.samplerate)
+    # Load model before recording starts so there's no delay mid-session
+    model = load_whisper_model(args.model)
+
+    print()
+    print("Press ENTER to start recording, then press ENTER again to stop.")
+    input("  > ready? press ENTER to begin … ")
+
+    # Clear / create transcript file
+    transcript_path.write_text("", encoding="utf-8")
+
+    stop_event = threading.Event()
+    chunk_q: queue.Queue = queue.Queue()
+    all_audio: list[np.ndarray] = []
+    all_segments: list[dict] = []
+
+    recorder = threading.Thread(
+        target=record_chunked,
+        args=(mic_idx, mon_idx, args.samplerate, args.chunk_duration, chunk_q, stop_event),
+        daemon=True,
+    )
+    transcriber = threading.Thread(
+        target=transcription_worker,
+        args=(chunk_q, model, args.language, initial_prompt,
+              args.samplerate, transcript_path, all_audio, all_segments),
+        daemon=True,
+    )
+
+    recorder.start()
+    transcriber.start()
+
+    print("Recording … (press ENTER to stop)")
+    input()
+    stop_event.set()
+
+    print("Stopping recording …")
+    recorder.join()
+    print("Finishing transcription …")
+    transcriber.join()
+
+    if not all_audio:
+        sys.exit("No audio was captured.")
+
+    full_audio = np.concatenate(all_audio)
+    total_duration = len(full_audio) / args.samplerate
+    print(f"Recorded {total_duration:.1f} seconds of audio.")
+
+    save_wav(wav_path, full_audio, args.samplerate)
     print(f"Audio saved to {wav_path}")
 
-    full_text, segments = transcribe_segments(wav_path, args.model, args.language, initial_prompt)
-
-    if args.diarize and segments:
+    if args.diarize and all_segments:
+        print()
         turns = diarize(wav_path, args.hf_token, args.num_speakers)
-        labeled = assign_speakers(segments, turns)
+        labeled = assign_speakers(all_segments, turns)
         output_text = format_diarized(labeled)
+        transcript_path.write_text(output_text, encoding="utf-8")
+        print()
+        print("=== TRANSCRIPT (with speaker labels) ===")
+        print(output_text)
     else:
-        output_text = full_text
+        output_text = transcript_path.read_text(encoding="utf-8")
+        print()
+        print("=== TRANSCRIPT ===")
+        print(output_text)
 
-    transcript_path.write_text(output_text, encoding="utf-8")
-    print(f"Transcript saved to {transcript_path}")
-    print()
-    print("=== TRANSCRIPT ===")
-    print(output_text)
+    print(f"\nTranscript saved to {transcript_path}")
 
     if args.no_audio_save:
         wav_path.unlink()
