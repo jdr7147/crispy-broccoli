@@ -159,7 +159,7 @@ pip install pyannote.audio
 
 | Argument | Default | Description |
 |---|---|---|
-| `--model SIZE` | `tiny` | Whisper model size. Larger = more accurate but slower. Choices: `tiny`, `base`, `small`, `medium`, `large`. `tiny` is fastest; upgrade to `base` or `small` if accuracy is poor. |
+| `--model SIZE` | `medium` | Whisper model size. Larger = more accurate but slower. Choices: `tiny`, `base`, `small`, `medium`, `large`. `medium` gives near-human accuracy; drop to `small` or `base` if it's too slow on your machine. |
 | `--language CODE` | `en` | Language of the meeting. Change if the meeting is not in English, e.g. `--language fr`. |
 | `--chunk-duration SECS` | `30` | How many seconds of audio to collect before each transcription pass. Lower = transcript updates more frequently but adds slight overhead. Raise to `60` on slower machines. |
 | `--initial-prompt "WORDS"` | *(from config file)* | Names or terms to hint Whisper toward for this session only. Merged with `transcribe_config.txt` automatically. Example: `--initial-prompt "Salesforce, Q3 roadmap"` |

@@ -313,9 +313,9 @@ def main():
     )
     parser.add_argument(
         "--model",
-        default="tiny",
+        default="medium",
         choices=["tiny", "base", "small", "medium", "large"],
-        help="Whisper model size (default: tiny)",
+        help="Whisper model size (default: medium)",
     )
     parser.add_argument("--language", default="en", help="Language code (default: en).")
     parser.add_argument(
