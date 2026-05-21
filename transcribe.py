@@ -8,16 +8,79 @@ real time (chunk by chunk), and optionally separates speakers
 
 import argparse
 import contextlib
+import io
+import logging
 import queue
 import sys
 import tempfile
 import threading
+import warnings
 import wave
 from datetime import datetime
 from pathlib import Path
 
 import numpy as np
 import sounddevice as sd
+
+
+# ---------------------------------------------------------------------------
+# Utilities
+# ---------------------------------------------------------------------------
+
+@contextlib.contextmanager
+def quiet():
+    """Suppress noisy library warnings, logging, and stderr chatter."""
+    noisy = [
+        "pyannote", "pytorch_lightning", "lightning_fabric", "lightning",
+        "transformers", "speechbrain", "asteroid_filterbanks", "numba",
+        "torch", "whisper",
+    ]
+    old_levels = {}
+    for name in noisy:
+        logger = logging.getLogger(name)
+        old_levels[name] = logger.level
+        logger.setLevel(logging.ERROR)
+
+    old_stderr = sys.stderr
+    sys.stderr = io.StringIO()
+    try:
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            yield
+    except Exception:
+        captured = sys.stderr.getvalue()
+        sys.stderr = old_stderr
+        if captured.strip():
+            print(captured, file=sys.stderr)
+        raise
+    finally:
+        if sys.stderr is not old_stderr:
+            sys.stderr = old_stderr
+        for name, level in old_levels.items():
+            logging.getLogger(name).setLevel(level)
+
+
+@contextlib.contextmanager
+def progress_spinner(message: str):
+    """Show a spinning progress indicator until the block completes."""
+    stop = threading.Event()
+
+    def spin():
+        chars = "|/-\\"
+        i = 0
+        while not stop.is_set():
+            print(f"\r  {chars[i % 4]} {message} …", end="", flush=True)
+            i += 1
+            stop.wait(timeout=0.15)
+        print(f"\r  {message} … done.          ")
+
+    t = threading.Thread(target=spin, daemon=True)
+    t.start()
+    try:
+        yield
+    finally:
+        stop.set()
+        t.join()
 
 
 # ---------------------------------------------------------------------------
@@ -150,8 +213,8 @@ def load_whisper_model(model_size: str):
         import whisper
     except ImportError:
         sys.exit("openai-whisper is not installed. Run: pip install openai-whisper")
-    print(f"Loading Whisper model '{model_size}' …")
-    return whisper.load_model(model_size)
+    with progress_spinner(f"Loading Whisper model '{model_size}'"), quiet():
+        return whisper.load_model(model_size)
 
 
 def transcribe_chunk(model, audio: np.ndarray, samplerate: int, language: str | None,
@@ -166,7 +229,8 @@ def transcribe_chunk(model, audio: np.ndarray, samplerate: int, language: str | 
             opts["language"] = language
         if initial_prompt:
             opts["initial_prompt"] = initial_prompt
-        result = model.transcribe(str(tmp_path), **opts)
+        with quiet():
+            result = model.transcribe(str(tmp_path), **opts)
     finally:
         tmp_path.unlink(missing_ok=True)
 
@@ -223,12 +287,11 @@ def diarize(wav_path: Path, hf_token: str, num_speakers: int | None):
     except ImportError:
         sys.exit("pyannote.audio is not installed. Run: pip install pyannote.audio")
 
-    print("Loading speaker diarization model …")
-    pipeline = Pipeline.from_pretrained(
-        "pyannote/speaker-diarization-3.1",
-        token=hf_token,
-    )
-    print("Running diarization …")
+    with progress_spinner("Loading speaker diarization model"), quiet():
+        pipeline = Pipeline.from_pretrained(
+            "pyannote/speaker-diarization-3.1",
+            token=hf_token,
+        )
 
     # Load via scipy to bypass torchcodec/FFmpeg on Windows
     import scipy.io.wavfile as wavfile
@@ -241,7 +304,8 @@ def diarize(wav_path: Path, hf_token: str, num_speakers: int | None):
     params = {}
     if num_speakers:
         params["num_speakers"] = num_speakers
-    diarization = pipeline(audio_input, **params)
+    with progress_spinner("Analyzing speakers"), quiet():
+        diarization = pipeline(audio_input, **params)
 
     # DiarizeOutput wraps the Annotation — unwrap it if needed
     annotation = diarization
