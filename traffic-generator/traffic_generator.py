@@ -48,10 +48,80 @@ class AttackRecord:
     timestamp: str
     impeded: bool = False
     impede_reasons: list[str] = field(default_factory=list)
+    s1_alerted: bool = False
+    s1_alert_notes: list[str] = field(default_factory=list)
 
 
 ATTACK_LOG: list[AttackRecord] = []
 _impeded_signals: list[str] = []
+
+# ---------------------------------------------------------------------------
+# SentinelOne threat-log monitoring (Linux only)
+# Reads new S1 agent log lines during each attack window to detect alerts
+# that fire in Detect mode (no process kill, but visible in S1 console).
+# ---------------------------------------------------------------------------
+
+_S1_LOG_CANDIDATES = [
+    "/opt/sentinelone/log/agent.log",
+    "/var/log/sentinelone/agent.log",
+]
+_S1_THREAT_KEYWORDS = frozenset([
+    "threat", "malicious", "suspicious", "behavioral", "quarantine",
+    "mitigation", "indicator", "detection", "kill_process",
+])
+
+
+def _s1_active_log() -> str | None:
+    for p in _S1_LOG_CANDIDATES:
+        if os.path.isfile(p):
+            return p
+    return None
+
+
+def _s1_log_offset() -> int:
+    """Return current byte size of the S1 log (used as a read cursor)."""
+    p = _s1_active_log()
+    if not p:
+        return -1
+    try:
+        return os.path.getsize(p)
+    except OSError:
+        return -1
+
+
+def _s1_detections_since(offset: int) -> list[str]:
+    """Return new S1 log lines added after *offset* that contain threat keywords."""
+    if offset < 0:
+        return []
+    p = _s1_active_log()
+    if not p:
+        return []
+    try:
+        with open(p, "r", errors="replace") as f:
+            f.seek(offset)
+            new_text = f.read()
+        hits = []
+        for line in new_text.splitlines():
+            if any(kw in line.lower() for kw in _S1_THREAT_KEYWORDS):
+                hits.append(line.strip()[:120])
+        return hits
+    except (OSError, PermissionError):
+        return []
+
+
+def _s1_sentinelctl_threat_count() -> int:
+    """Return number of threats reported by sentinelctl, or -1 if unavailable."""
+    sentinelctl = "/opt/sentinelone/bin/sentinelctl"
+    if not os.path.isfile(sentinelctl):
+        return -1
+    try:
+        result = subprocess.run(
+            [sentinelctl, "threats", "list"],
+            capture_output=True, text=True, timeout=5,
+        )
+        return result.stdout.count("\n")
+    except Exception:
+        return -1
 
 
 def _note_impeded(reason: str) -> None:
@@ -1504,16 +1574,40 @@ def print_summary(start_time: float) -> None:
     log.info("=" * W)
     log.info("  Run time : %s  |  Attacks fired : %d", elapsed_str, len(ATTACK_LOG))
 
+    s1_log_available = _s1_active_log() is not None or _s1_sentinelctl_threat_count() >= 0
+
     if not ATTACK_LOG:
         log.info("  No attacks were fired during this run.")
     else:
         log.info("-" * W)
-        log.info("  %-8s  %-42s  %-9s  %s", "TIME", "ATTACK", "IMPEDED?", "NOTES")
+        if s1_log_available:
+            log.info("  %-8s  %-38s  %-9s  %-8s  %s", "TIME", "ATTACK", "IMPEDED?", "S1 ALERT", "NOTES")
+        else:
+            log.info("  %-8s  %-42s  %-9s  %s", "TIME", "ATTACK", "IMPEDED?", "NOTES")
         log.info("  " + "-" * (W - 2))
         for rec in ATTACK_LOG:
             impeded_str = "YES <<<" if rec.impeded else "no"
-            notes = "; ".join(rec.impede_reasons)[:35] if rec.impede_reasons else ""
-            log.info("  %-8s  %-42s  %-9s  %s", rec.timestamp, rec.name, impeded_str, notes)
+            notes_parts = list(rec.impede_reasons)
+            if s1_log_available:
+                alerted_str = "YES" if rec.s1_alerted else "no"
+                notes = "; ".join(notes_parts)[:30] if notes_parts else ""
+                log.info("  %-8s  %-38s  %-9s  %-8s  %s", rec.timestamp, rec.name, impeded_str, alerted_str, notes)
+            else:
+                notes = "; ".join(notes_parts)[:35] if notes_parts else ""
+                log.info("  %-8s  %-42s  %-9s  %s", rec.timestamp, rec.name, impeded_str, notes)
+
+    # Detection summary counts
+    impeded_count = sum(1 for r in ATTACK_LOG if r.impeded)
+    alerted_count = sum(1 for r in ATTACK_LOG if r.s1_alerted)
+    if ATTACK_LOG:
+        log.info("")
+        log.info("  DETECTION SUMMARY")
+        log.info("  " + "-" * (W - 2))
+        log.info("  Impeded (killed/deleted by EDR) : %d / %d", impeded_count, len(ATTACK_LOG))
+        if s1_log_available:
+            log.info("  S1 console alerts (detect mode) : %d / %d", alerted_count, len(ATTACK_LOG))
+        else:
+            log.info("  S1 log not found — run as root or check /opt/sentinelone/log/")
 
     # Passive attack section
     fired_passive = [r for r in ATTACK_LOG if r.name in _PASSIVE_ATTACKS]
@@ -1590,16 +1684,29 @@ def run_loop(
                     log.warning("  ATTACK SIMULATION — %s", action.__name__)
                     log.warning("-" * 60)
                     _impeded_signals.clear()
+                    s1_offset = _s1_log_offset()
+                    s1_ctl_before = _s1_sentinelctl_threat_count()
                     ts = datetime.datetime.now().strftime("%H:%M:%S")
                     try:
                         action()
                     except Exception as exc:
                         log.debug("Attack action error: %s", exc)
+                    s1_log_hits = _s1_detections_since(s1_offset)
+                    s1_ctl_after = _s1_sentinelctl_threat_count()
+                    s1_ctl_new = (s1_ctl_after - s1_ctl_before) if s1_ctl_before >= 0 and s1_ctl_after >= 0 else 0
+                    s1_alerted = bool(s1_log_hits) or s1_ctl_new > 0
+                    s1_notes: list[str] = []
+                    if s1_log_hits:
+                        s1_notes.append(f"S1 log: {s1_log_hits[0][:80]}")
+                    if s1_ctl_new > 0:
+                        s1_notes.append(f"sentinelctl: +{s1_ctl_new} new threat(s)")
                     ATTACK_LOG.append(AttackRecord(
                         name=action.__name__,
                         timestamp=ts,
                         impeded=bool(_impeded_signals),
                         impede_reasons=list(_impeded_signals),
+                        s1_alerted=s1_alerted,
+                        s1_alert_notes=s1_notes,
                     ))
                 else:
                     log.info("%s Attack window — no attack this cycle", _tag("NORMAL"))
