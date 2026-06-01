@@ -128,8 +128,6 @@ def _normalize(audio: np.ndarray) -> np.ndarray:
 def mix_to_mono(a: np.ndarray, b: np.ndarray) -> np.ndarray:
     a_mono = a.mean(axis=1) if a.ndim > 1 else a.flatten()
     b_mono = b.mean(axis=1) if b.ndim > 1 else b.flatten()
-    a_mono = _normalize(a_mono)
-    b_mono = _normalize(b_mono)
     n = min(len(a_mono), len(b_mono))
     return np.clip((a_mono[:n] + b_mono[:n]) / 2.0, -1.0, 1.0)
 
@@ -242,6 +240,30 @@ def transcribe_chunk(model, audio: np.ndarray, samplerate: int, language: str | 
     return text, segments
 
 
+HALLUCINATIONS = {
+    "thanks for watching",
+    "thank you for watching",
+    "thank you for watching!",
+    "please subscribe",
+    "subscribe to my channel",
+    "like and subscribe",
+    "see you next time",
+    "see you in the next video",
+    "don't forget to subscribe",
+    "check out my other videos",
+}
+
+SILENCE_RMS_THRESHOLD = 0.01
+
+
+def is_silent(audio: np.ndarray) -> bool:
+    return float(np.sqrt(np.mean(audio ** 2))) < SILENCE_RMS_THRESHOLD
+
+
+def is_hallucination(text: str) -> bool:
+    return text.lower().strip().rstrip("!.,") in HALLUCINATIONS
+
+
 def transcription_worker(chunk_queue, model, language, initial_prompt, samplerate,
                          transcript_path, all_audio, all_segments):
     """Consume audio chunks, transcribe each, and append to transcript file in real time."""
@@ -256,7 +278,7 @@ def transcription_worker(chunk_queue, model, language, initial_prompt, samplerat
         all_audio.append(chunk)
         duration = len(chunk) / samplerate
 
-        if duration < 1.0:
+        if duration < 1.0 or is_silent(chunk):
             time_offset += duration
             continue
 
@@ -264,12 +286,12 @@ def transcription_worker(chunk_queue, model, language, initial_prompt, samplerat
         print(f"  [transcribing chunk {chunk_num}]", end=" ", flush=True)
         text, segs = transcribe_chunk(model, chunk, samplerate, language, initial_prompt, time_offset)
 
-        if text:
+        if text and not is_hallucination(text):
             with open(transcript_path, "a", encoding="utf-8") as f:
                 f.write(text + "\n")
             print(text)
         else:
-            print("(silence)")
+            print()
 
         all_segments.extend(segs)
         time_offset += duration
@@ -517,7 +539,8 @@ def main():
     total_duration = len(full_audio) / args.samplerate
     print(f"Recorded {total_duration:.1f} seconds of audio.")
 
-    save_wav(wav_path, full_audio, args.samplerate)
+    # Normalize the full mix for diarization (equal loudness across speakers)
+    save_wav(wav_path, _normalize(full_audio), args.samplerate)
     print(f"Audio saved to {wav_path}")
 
     if args.diarize and all_segments:
