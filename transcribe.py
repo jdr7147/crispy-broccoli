@@ -277,21 +277,26 @@ def transcription_worker(chunk_queue, model, language, initial_prompt, samplerat
 
         all_audio.append(chunk)
         duration = len(chunk) / samplerate
+        chunk_num += 1
 
-        if duration < 1.0 or is_silent(chunk):
+        if duration < 1.0:
             time_offset += duration
             continue
 
-        chunk_num += 1
-        print(f"  [transcribing chunk {chunk_num}]", end=" ", flush=True)
+        if is_silent(chunk):
+            print(f"  [chunk {chunk_num} ({duration:.0f}s): below audio threshold, skipping]", flush=True)
+            time_offset += duration
+            continue
+
+        print(f"  [chunk {chunk_num} ({duration:.0f}s): transcribing …]", flush=True)
         text, segs = transcribe_chunk(model, chunk, samplerate, language, initial_prompt, time_offset)
 
         if text and not is_hallucination(text):
             with open(transcript_path, "a", encoding="utf-8") as f:
                 f.write(text + "\n")
-            print(text)
+            print(f"  → {text}")
         else:
-            print()
+            print(f"  [chunk {chunk_num}: no speech detected]")
 
         all_segments.extend(segs)
         time_offset += duration
@@ -412,8 +417,8 @@ def main():
     parser.add_argument(
         "--chunk-duration",
         type=int,
-        default=30,
-        help="Seconds of audio per transcription chunk (default: 30).",
+        default=15,
+        help="Seconds of audio per transcription chunk (default: 15).",
     )
     parser.add_argument("--samplerate", type=int, default=16000)
     parser.add_argument("--output-dir", type=Path, default=Path("."))
@@ -483,7 +488,7 @@ def main():
         print("  System audio  : not found — recording microphone only")
     print(f"  Whisper model : {args.model}")
     print(f"  Language      : {args.language}")
-    print(f"  Chunk duration: {args.chunk_duration}s")
+    print(f"  Chunk duration: {args.chunk_duration}s  (first transcript line appears after this many seconds)")
     print(f"  Prompt hints  : {initial_prompt or '(none)'}")
     print(f"  Diarization   : {'yes' if args.diarize else 'no'}")
     print()

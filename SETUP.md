@@ -161,7 +161,7 @@ pip install pyannote.audio
 |---|---|---|
 | `--model SIZE` | `medium` | Whisper model size. Larger = more accurate but slower. Choices: `tiny`, `base`, `small`, `medium`, `large`. `medium` gives near-human accuracy; drop to `small` or `base` if it's too slow on your machine. |
 | `--language CODE` | `en` | Language of the meeting. Change if the meeting is not in English, e.g. `--language fr`. |
-| `--chunk-duration SECS` | `30` | How many seconds of audio to collect before each transcription pass. Lower = transcript updates more frequently but adds slight overhead. Raise to `60` on slower machines. |
+| `--chunk-duration SECS` | `15` | How many seconds of audio to collect before each transcription pass. Lower = transcript updates more frequently. Raise to `30` or `60` on slower machines if transcription can't keep up. |
 | `--initial-prompt "WORDS"` | *(from config file)* | Names or terms to hint Whisper toward for this session only. Merged with `transcribe_config.txt` automatically. Example: `--initial-prompt "Salesforce, Q3 roadmap"` |
 | `--samplerate HZ` | `16000` | Audio sample rate in Hz. 16000 is correct for Whisper and rarely needs changing. |
 | `--output-dir PATH` | `.` (current folder) | Folder where transcript and audio files are saved. Created automatically if it does not exist. Example: `--output-dir C:\Meetings` |
