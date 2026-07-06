@@ -173,11 +173,23 @@ def record_chunked(mic_idx, mon_idx, samplerate, chunk_duration, chunk_queue, st
                        dtype="float32", callback=mic_cb)
     ]
     if mon_idx is not None:
+        mon_opened = False
         mon_channels = min(int(sd.query_devices(mon_idx)["max_input_channels"]), 2)
-        streams.append(
-            sd.InputStream(device=mon_idx, channels=mon_channels, samplerate=samplerate,
-                           dtype="float32", callback=mon_cb)
-        )
+        for ch in sorted({mon_channels, 1}, reverse=True):
+            try:
+                streams.append(
+                    sd.InputStream(device=mon_idx, channels=ch, samplerate=samplerate,
+                                   dtype="float32", callback=mon_cb)
+                )
+                mon_opened = True
+                break
+            except Exception:
+                continue
+        if not mon_opened:
+            print(
+                "\n  [warning] Could not open system audio device — recording microphone only.\n"
+                "  Run --list-devices, then retry with --monitor-device INDEX to pick a different device."
+            )
 
     with contextlib.ExitStack() as stack:
         for s in streams:
