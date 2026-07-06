@@ -12,7 +12,6 @@ import io
 import logging
 import queue
 import sys
-import tempfile
 import threading
 import warnings
 import wave
@@ -218,19 +217,13 @@ def load_whisper_model(model_size: str):
 def transcribe_chunk(model, audio: np.ndarray, samplerate: int, language: str | None,
                      initial_prompt: str | None, time_offset: float):
     """Transcribe a single audio chunk. Returns (text, segments) with absolute timestamps."""
-    with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tf:
-        tmp_path = Path(tf.name)
-    try:
-        save_wav(tmp_path, audio, samplerate)
-        opts = {"word_timestamps": False}
-        if language:
-            opts["language"] = language
-        if initial_prompt:
-            opts["initial_prompt"] = initial_prompt
-        with quiet():
-            result = model.transcribe(str(tmp_path), **opts)
-    finally:
-        tmp_path.unlink(missing_ok=True)
+    opts = {"word_timestamps": False}
+    if language:
+        opts["language"] = language
+    if initial_prompt:
+        opts["initial_prompt"] = initial_prompt
+    with quiet():
+        result = model.transcribe(audio, **opts)
 
     text = result["text"].strip()
     segments = [
