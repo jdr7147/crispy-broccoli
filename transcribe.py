@@ -173,8 +173,9 @@ def record_chunked(mic_idx, mon_idx, samplerate, chunk_duration, chunk_queue, st
                        dtype="float32", callback=mic_cb)
     ]
     if mon_idx is not None:
+        mon_channels = min(int(sd.query_devices(mon_idx)["max_input_channels"]), 2)
         streams.append(
-            sd.InputStream(device=mon_idx, channels=2, samplerate=samplerate,
+            sd.InputStream(device=mon_idx, channels=mon_channels, samplerate=samplerate,
                            dtype="float32", callback=mon_cb)
         )
 
